@@ -54,6 +54,7 @@ from nerfstudio.model_components.renderers import (
 from nerfstudio.model_components.scene_colliders import NearFarCollider
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import colormaps, misc
+from nerfstudio.utils.colors import get_color
 
 
 @dataclass
@@ -136,6 +137,9 @@ class KPlanesModelConfig(ModelConfig):
 
     background_color: Literal["random", "last_sample", "black", "white"] = "white"
     """The background color as RGB."""
+
+    train_with_random_bg: bool = True
+    """Use a randomzied background during training"""
 
     loss_coefficients: Dict[str, float] = to_immutable_dict(
         {
@@ -238,8 +242,7 @@ class KPlanesModel(Model):
         self.collider = NearFarCollider(near_plane=self.config.near_plane, far_plane=self.config.far_plane)
 
         # renderers
-        background_color = self.config.background_color
-        self.renderer_rgb = RGBRenderer(background_color=background_color)
+        self.renderer_rgb = RGBRenderer(background_color=self.config.background_color)
         self.renderer_accumulation = AccumulationRenderer()
         self.renderer_depth = DepthRenderer()
         self.renderer_normals = NormalsRenderer()
@@ -297,16 +300,18 @@ class KPlanesModel(Model):
         weights_list.append(weights)
         ray_samples_list.append(ray_samples)
 
-        rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
+        outputs = {}
+        if self.training and self.config.train_with_random_bg:
+            background = torch.rand_like(ray_bundle.origins)
+            outputs["bg_color"] = background
+        else:
+            background = None
 
-        depth = self.renderer_depth(weights=weights, ray_samples=ray_samples)
-        accumulation = self.renderer_accumulation(weights=weights)
-
-        outputs = {
-            "rgb": rgb,
-            "accumulation": accumulation,
-            "depth": depth,
-        }
+        outputs["rgb"] = self.renderer_rgb(
+            rgb=field_outputs[FieldHeadNames.RGB], weights=weights, background=background
+        )
+        outputs["depth"] = self.renderer_depth(weights=weights, ray_samples=ray_samples)
+        outputs["accumulation"] = self.renderer_accumulation(weights=weights)
 
         # These use a lot of GPU memory, so we avoid storing them for eval.
         if self.training:
@@ -319,7 +324,7 @@ class KPlanesModel(Model):
         return outputs
 
     def get_metrics_dict(self, outputs, batch):
-        image = batch["image"].to(self.device)
+        image = self._get_image(batch, outputs)
 
         metrics_dict = {}
         metrics_dict["psnr"] = self.psnr(outputs["rgb"], image)
@@ -342,7 +347,7 @@ class KPlanesModel(Model):
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
-        image = batch["image"].to(self.device)
+        image = self._get_image(batch, outputs)
 
         loss_dict = {}
         loss_dict["rgb"] = self.rgb_loss(image, outputs["rgb"])
@@ -358,7 +363,7 @@ class KPlanesModel(Model):
     def get_image_metrics_and_images(
         self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
     ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
-        image = batch["image"].to(self.device)
+        image = self._get_image(batch, outputs)
 
         rgb = outputs["rgb"]
         acc = colormaps.apply_colormap(outputs["accumulation"])
@@ -391,6 +396,16 @@ class KPlanesModel(Model):
             images_dict[key] = prop_depth_i
 
         return metrics_dict, images_dict
+
+    def _get_image(self, batch: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        image = batch["image"].to(self.device)
+
+        if self.config.train_with_random_bg:
+            alpha = batch["alpha"].to(self.device)
+            bg = outputs["bg_color"] if self.training else get_color(self.config.background_color).to(self.device)
+            image = image * alpha + bg * (1.0 - alpha)
+
+        return image
 
 
 def compute_plane_tv(t: torch.Tensor, only_w: bool = False) -> float:

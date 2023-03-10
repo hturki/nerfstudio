@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import numpy.typing as npt
@@ -73,19 +73,25 @@ class InputDataset(Dataset):
         assert image.shape[2] in [3, 4], f"Image shape of {image.shape} is in correct."
         return image
 
-    def get_image(self, image_idx: int) -> TensorType["image_height", "image_width", "num_channels"]:
+    def get_image(
+        self, image_idx: int
+    ) -> Tuple[
+        TensorType["image_height", "image_width", "num_channels"],
+        Optional[TensorType["image_height", "image_width", 1]],
+    ]:
         """Returns a 3 channel image.
 
         Args:
             image_idx: The image index in the dataset.
         """
         image = torch.from_numpy(self.get_numpy_image(image_idx).astype("float32") / 255.0)
+        alpha = image[:, :, -1:] if image.shape[-1] == 4 else None
         if self._dataparser_outputs.alpha_color is not None and image.shape[-1] == 4:
             assert image.shape[-1] == 4
             image = image[:, :, :3] * image[:, :, -1:] + self._dataparser_outputs.alpha_color * (1.0 - image[:, :, -1:])
         else:
             image = image[:, :, :3]
-        return image
+        return image, alpha
 
     def get_data(self, image_idx: int) -> Dict:
         """Returns the ImageDataset data as a dictionary.
@@ -93,9 +99,11 @@ class InputDataset(Dataset):
         Args:
             image_idx: The image index in the dataset.
         """
-        image = self.get_image(image_idx)
+        image, alpha = self.get_image(image_idx)
         data = {"image_idx": image_idx}
         data["image"] = image
+        if alpha is not None:
+            data["alpha"] = alpha
         if self.has_masks:
             mask_filepath = self._dataparser_outputs.mask_filenames[image_idx]
             data["mask"] = get_image_mask_tensor_from_path(filepath=mask_filepath, scale_factor=self.scale_factor)

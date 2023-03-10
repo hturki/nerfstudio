@@ -84,17 +84,23 @@ def variable_res_collate(batch: List[Dict]) -> Dict:
     """
     images = []
     masks = []
+    alphas = []
     for data in batch:
         image = data.pop("image")
         mask = data.pop("mask", None)
+        alpha = data.pop("alpha", None)
         images.append(image)
         if mask:
             masks.append(mask)
+        if alpha is not None:
+            alphas.append(alpha)
 
     new_batch: dict = nerfstudio_collate(batch)
     new_batch["image"] = images
     if masks:
         new_batch["mask"] = masks
+    if alphas:
+        new_batch["alpha"] = alphas
 
     return new_batch
 
