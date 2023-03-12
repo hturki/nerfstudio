@@ -22,19 +22,24 @@ from typing import Dict
 
 import tyro
 from nerfacc import ContractionType
+from nerfstudio.data.datamanagers.variable_res_datamanager import (
+    VariableResDataManagerConfig,
+)
 
 from nerfstudio.cameras.camera_optimizers import CameraOptimizerConfig
 from nerfstudio.configs.base_config import ViewerConfig
 from nerfstudio.data.datamanagers.base_datamanager import VanillaDataManagerConfig
 from nerfstudio.data.datamanagers.depth_datamanager import DepthDataManagerConfig
+from nerfstudio.data.datamanagers.random_subset_datamanager import RandomSubsetDataManagerConfig
 from nerfstudio.data.datamanagers.sdf_datamanager import SDFDataManagerConfig
 from nerfstudio.data.datamanagers.semantic_datamanager import SemanticDataManagerConfig
+from nerfstudio.data.datamanagers.semantic_datamanager import SemanticDataManagerConfig
+from nerfstudio.data.datamanagers.weighted_variable_res_datamanager import WeightedVariableResDataManagerConfig
+from nerfstudio.data.dataparsers.adop_dataparser import AdopDataParserConfig
 from nerfstudio.data.dataparsers.blender_dataparser import BlenderDataParserConfig
 from nerfstudio.data.dataparsers.dnerf_dataparser import DNeRFDataParserConfig
 from nerfstudio.data.dataparsers.dycheck_dataparser import DycheckDataParserConfig
-from nerfstudio.data.dataparsers.instant_ngp_dataparser import (
-    InstantNGPDataParserConfig,
-)
+from nerfstudio.data.dataparsers.multicam_dataparser import MulticamDataParserConfig
 from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataParserConfig
 from nerfstudio.data.dataparsers.phototourism_dataparser import (
     PhototourismDataParserConfig,
@@ -51,7 +56,10 @@ from nerfstudio.field_components.temporal_distortions import TemporalDistortionK
 from nerfstudio.models.depth_nerfacto import DepthNerfactoModelConfig
 from nerfstudio.models.instant_ngp import InstantNGPModelConfig
 from nerfstudio.models.kplanes import KPlanesModelConfig
+from nerfstudio.models.mip_instant_ngp import MipInstantNGPModelConfig
+from nerfstudio.models.mip_kplanes import MipKPlanesModelConfig
 from nerfstudio.models.mipnerf import MipNerfModel
+from nerfstudio.models.mipnerfacto import MipNerfactoModelConfig
 from nerfstudio.models.nerfacto import NerfactoModelConfig
 from nerfstudio.models.nerfplayer_nerfacto import NerfplayerNerfactoModelConfig
 from nerfstudio.models.nerfplayer_ngp import NerfplayerNGPModelConfig
@@ -87,31 +95,66 @@ method_configs["nerfacto"] = TrainerConfig(
     method_name="nerfacto",
     steps_per_eval_batch=500,
     steps_per_save=2000,
-    max_num_iterations=30000,
+    max_num_iterations=50001,
     mixed_precision=True,
     pipeline=VanillaPipelineConfig(
-        datamanager=VanillaDataManagerConfig(
-            dataparser=NerfstudioDataParserConfig(),
+        datamanager=RandomSubsetDataManagerConfig(
+            dataparser=AdopDataParserConfig(),
+            # dataparser=NerfstudioDataParserConfig(),
             train_num_rays_per_batch=4096,
             eval_num_rays_per_batch=4096,
-            camera_optimizer=CameraOptimizerConfig(
-                mode="SO3xR3", optimizer=AdamOptimizerConfig(lr=6e-4, eps=1e-8, weight_decay=1e-2)
-            ),
+            # camera_optimizer=CameraOptimizerConfig(
+            #     mode="SO3xR3", optimizer=AdamOptimizerConfig(lr=6e-4, eps=1e-8, weight_decay=1e-2)
+            # ),
         ),
         model=NerfactoModelConfig(eval_num_rays_per_chunk=1 << 15),
     ),
     optimizers={
         "proposal_networks": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            "scheduler": None,
+            'scheduler': CosineWithWarmupSchedulerConfig(training_steps=50000),
         },
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            "scheduler": None,
+            'scheduler': CosineWithWarmupSchedulerConfig(training_steps=50000),
         },
     },
-    viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
-    vis="viewer",
+    # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+    # vis="viewer",
+    steps_per_eval_all_images=50000
+)
+
+method_configs["mipnerfacto"] = TrainerConfig(
+    method_name="mipnerfacto",
+    steps_per_eval_batch=500,
+    steps_per_save=2000,
+    max_num_iterations=50001,
+    mixed_precision=True,
+    pipeline=VanillaPipelineConfig(
+        datamanager=RandomSubsetDataManagerConfig(
+            dataparser=AdopDataParserConfig(),
+            # dataparser=NerfstudioDataParserConfig(),
+            train_num_rays_per_batch=4096,
+            eval_num_rays_per_batch=4096,
+            # camera_optimizer=CameraOptimizerConfig(
+            #     mode="SO3xR3", optimizer=AdamOptimizerConfig(lr=6e-4, eps=1e-8, weight_decay=1e-2)
+            # ),
+        ),
+        model=MipNerfactoModelConfig(eval_num_rays_per_chunk=1 << 15),
+    ),
+    optimizers={
+        "mlps": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15, weight_decay=1e-8),
+            'scheduler': CosineWithWarmupSchedulerConfig(training_steps=50000),
+        },
+        "fields": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            'scheduler': CosineWithWarmupSchedulerConfig(training_steps=50000),
+        },
+    },
+    # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+    # vis="viewer",
+    steps_per_eval_all_images=50000
 )
 
 method_configs["depth-nerfacto"] = TrainerConfig(
@@ -166,10 +209,10 @@ method_configs["volinga"] = TrainerConfig(
             hidden_dim_color=32,
             hidden_dim_transient=32,
             num_nerf_samples_per_ray=24,
-            proposal_net_args_list=[
-                {"hidden_dim": 16, "log2_hashmap_size": 17, "num_levels": 5, "max_res": 128, "use_linear": True},
-                {"hidden_dim": 16, "log2_hashmap_size": 17, "num_levels": 5, "max_res": 256, "use_linear": True},
-            ],
+            # proposal_net_args_list=[
+            #     {"hidden_dim": 16, "log2_hashmap_size": 17, "num_levels": 5, "max_res": 128, "use_linear": True},
+            #     {"hidden_dim": 16, "log2_hashmap_size": 17, "num_levels": 5, "max_res": 256, "use_linear": True},
+            # ],
         ),
     ),
     optimizers={
@@ -206,43 +249,88 @@ method_configs["instant-ngp"] = TrainerConfig(
     vis="viewer",
 )
 
-
 method_configs["instant-ngp-bounded"] = TrainerConfig(
     method_name="instant-ngp-bounded",
     steps_per_eval_batch=500,
-    steps_per_save=2000,
-    max_num_iterations=30000,
+    steps_per_save=50000,
+    max_num_iterations=50001,
     mixed_precision=True,
     pipeline=DynamicBatchPipelineConfig(
-        datamanager=VanillaDataManagerConfig(dataparser=InstantNGPDataParserConfig(), train_num_rays_per_batch=8192),
+        datamanager=WeightedVariableResDataManagerConfig(dataparser=MulticamDataParserConfig(),
+                                                         train_num_rays_per_batch=1 << 18),
+        # datamanager=WeightedVariableResDataManagerConfig(dataparser=BlenderDataParserConfig(),
+        #                                                  train_num_rays_per_batch=1 << 18),
         model=InstantNGPModelConfig(
             eval_num_rays_per_chunk=8192,
             contraction_type=ContractionType.AABB,
             render_step_size=0.001,
-            max_num_samples_per_ray=48,
-            near_plane=0.01,
-            background_color="black",
+            max_num_samples_per_ray=1024,
+            near_plane=0,
+            far_plane=None,
+            background_color="white",
+            cone_angle=0
         ),
     ),
     optimizers={
+        # "mlps": {
+        #     "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),#, weight_decay=1e-6),
+        #     'scheduler': MultiStepLRConfig(),
+        # },
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            "scheduler": None,
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=35000),
         }
     },
-    viewer=ViewerConfig(num_rays_per_chunk=64000),
-    vis="viewer",
+    # viewer=ViewerConfig(num_rays_per_chunk=64000),
+    # vis="viewer",
+    steps_per_eval_all_images=10000
 )
 
+method_configs["mip-instant-ngp-bounded"] = TrainerConfig(
+    method_name="mip-instant-ngp-bounded",
+    steps_per_eval_batch=500,
+    steps_per_save=35000,
+    max_num_iterations=35001,
+    mixed_precision=True,
+    pipeline=DynamicBatchPipelineConfig(
+        # datamanager=VanillaDataManagerConfig(dataparser=InstantNGPDataParserConfig(), train_num_rays_per_batch=8192),
+        datamanager=WeightedVariableResDataManagerConfig(dataparser=MulticamDataParserConfig(),
+                                                         train_num_rays_per_batch=8192),
+        model=MipInstantNGPModelConfig(
+            eval_num_rays_per_chunk=2048,
+            contraction_type=ContractionType.AABB,
+            max_num_samples_per_ray=1024,
+            near_plane=0,
+            far_plane=None,
+            background_color="white",
+            cone_angle=0
+        ),
+    ),
+    optimizers={
+        "mlps": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=35000),
+        },
+        "fields": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=35000),
+        }
+    },
+    # viewer=ViewerConfig(num_rays_per_chunk=64000),
+    # vis="viewer",
+    steps_per_eval_all_images=35000
+)
 
 method_configs["mipnerf"] = TrainerConfig(
     method_name="mipnerf",
     pipeline=VanillaPipelineConfig(
-        datamanager=VanillaDataManagerConfig(dataparser=NerfstudioDataParserConfig(), train_num_rays_per_batch=1024),
+        # datamanager=VanillaDataManagerConfig(dataparser=BlenderDataParserConfig(), train_num_rays_per_batch=4096),
+        datamanager=WeightedVariableResDataManagerConfig(dataparser=BlenderDataParserConfig(),
+                                                         train_num_rays_per_batch=4096),
         model=VanillaModelConfig(
             _target=MipNerfModel,
             loss_coefficients={"rgb_loss_coarse": 0.1, "rgb_loss_fine": 1.0},
-            num_coarse_samples=128,
+            num_coarse_samples=64,
             num_importance_samples=128,
             eval_num_rays_per_chunk=1024,
         ),
@@ -250,9 +338,10 @@ method_configs["mipnerf"] = TrainerConfig(
     optimizers={
         "fields": {
             "optimizer": RAdamOptimizerConfig(lr=5e-4, eps=1e-08),
-            "scheduler": None,
+            'scheduler': ExponentialDecaySchedulerConfig(lr_final=5e-6, max_steps=1000000),
         }
     },
+    steps_per_eval_all_images=1000000
 )
 
 method_configs["semantic-nerfw"] = TrainerConfig(
@@ -284,21 +373,25 @@ method_configs["semantic-nerfw"] = TrainerConfig(
 method_configs["vanilla-nerf"] = TrainerConfig(
     method_name="vanilla-nerf",
     pipeline=VanillaPipelineConfig(
-        datamanager=VanillaDataManagerConfig(
-            dataparser=BlenderDataParserConfig(),
-        ),
-        model=VanillaModelConfig(_target=NeRFModel),
+        # datamanager=VanillaDataManagerConfig(dataparser=BlenderDataParserConfig(), train_num_rays_per_batch=4096),
+        datamanager=WeightedVariableResDataManagerConfig(dataparser=BlenderDataParserConfig(),
+                                                         train_num_rays_per_batch=4096),
+        model=VanillaModelConfig(_target=NeRFModel,
+                                 num_coarse_samples=64,
+                                 num_importance_samples=128,
+                                 eval_num_rays_per_chunk=1024),
     ),
     optimizers={
         "fields": {
             "optimizer": RAdamOptimizerConfig(lr=5e-4, eps=1e-08),
-            "scheduler": None,
+            'scheduler': ExponentialDecaySchedulerConfig(lr_final=5e-6, max_steps=1000000),
         },
         "temporal_distortion": {
-            "optimizer": RAdamOptimizerConfig(lr=5e-4, eps=1e-08),
-            "scheduler": None,
+            "optimizer": AdamOptimizerConfig(lr=5e-4, eps=1e-08),
+            'scheduler': ExponentialDecaySchedulerConfig(lr_final=5e-6, max_steps=1000000),
         },
     },
+    steps_per_eval_all_images=1000000
 )
 
 method_configs["tensorf"] = TrainerConfig(
@@ -481,15 +574,15 @@ method_configs["kplanes"] = TrainerConfig(
     method_name="kplanes",
     steps_per_eval_batch=500,
     steps_per_save=2000,
-    max_num_iterations=30001,
+    max_num_iterations=50001,
     mixed_precision=True,
     pipeline=VanillaPipelineConfig(
-        datamanager=VanillaDataManagerConfig(
-            dataparser=BlenderDataParserConfig(),
+        datamanager=RandomSubsetDataManagerConfig(
+            dataparser=AdopDataParserConfig(),
             train_num_rays_per_batch=4096,
-            eval_num_rays_per_batch=4096,
+            eval_num_rays_per_batch=2048,
         ),
-        model=KPlanesModelConfig(eval_num_rays_per_chunk=1 << 15),
+        model=MipKPlanesModelConfig(eval_num_rays_per_chunk=4096),
     ),
     optimizers={
         "proposal_networks": {
@@ -514,6 +607,7 @@ method_configs["kplanes-dynamic"] = TrainerConfig(
     pipeline=VanillaPipelineConfig(
         datamanager=VanillaDataManagerConfig(
             dataparser=DNeRFDataParserConfig(),
+
             train_num_rays_per_batch=4096,
             eval_num_rays_per_batch=4096,
         ),

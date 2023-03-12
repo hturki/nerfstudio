@@ -316,14 +316,31 @@ class UncertaintyRenderer(nn.Module):
 class SemanticRenderer(nn.Module):
     """Calculate semantics along the ray."""
 
+
     @classmethod
     def forward(
         cls,
         semantics: TensorType["bs":..., "num_samples", "num_classes"],
         weights: TensorType["bs":..., "num_samples", 1],
-    ) -> TensorType["bs":..., "num_classes"]:
-        """Calculate semantics along the ray."""
-        sem = torch.sum(weights * semantics, dim=-2)
+        ray_indices: Optional[TensorType["num_samples"]] = None,
+        num_rays: Optional[int] = None,
+    ) -> TensorType["bs":..., 1]:
+        """Composite samples along ray and calculate accumulation.
+
+        Args:
+            weights: Weights for each sample
+            ray_indices: Ray index for each sample, used when samples are packed.
+            num_rays: Number of rays, used when samples are packed.
+
+        Returns:
+            Outputs of accumulated values.
+        """
+
+        if ray_indices is not None and num_rays is not None:
+            # Necessary for packed samples from volumetric ray sampler
+            sem = nerfacc.accumulate_along_rays(weights, ray_indices, semantics, num_rays)
+        else:
+            sem = torch.sum(weights * semantics, dim=-2)
         return sem
 
 

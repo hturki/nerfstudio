@@ -26,6 +26,7 @@ from torch.nn.parameter import Parameter
 from torchtyping import TensorType
 
 from nerfstudio.cameras.rays import RaySamples
+from nerfstudio.data.dataparsers.adop_dataparser import TRAIN_INDICES
 from nerfstudio.data.scene_box import SceneBox
 from nerfstudio.field_components.activations import trunc_exp
 from nerfstudio.field_components.embedding import Embedding
@@ -102,6 +103,7 @@ class TCNNNerfactoField(Field):
         num_semantic_classes: int = 100,
         pass_semantic_gradients: bool = False,
         use_pred_normals: bool = False,
+        use_train_appearance_embedding: bool = True,
         use_average_appearance_embedding: bool = False,
         spatial_distortion: SpatialDistortion = None,
     ) -> None:
@@ -118,6 +120,7 @@ class TCNNNerfactoField(Field):
         self.num_images = num_images
         self.appearance_embedding_dim = appearance_embedding_dim
         self.embedding_appearance = Embedding(self.num_images, self.appearance_embedding_dim)
+        self.use_train_appearance_embedding = use_train_appearance_embedding
         self.use_average_appearance_embedding = use_average_appearance_embedding
         self.use_transient_embedding = use_transient_embedding
         self.use_semantics = use_semantics
@@ -265,17 +268,19 @@ class TCNNNerfactoField(Field):
         outputs_shape = ray_samples.frustums.directions.shape[:-1]
 
         # appearance
-        if self.training:
-            embedded_appearance = self.embedding_appearance(camera_indices)
-        else:
-            if self.use_average_appearance_embedding:
-                embedded_appearance = torch.ones(
-                    (*directions.shape[:-1], self.appearance_embedding_dim), device=directions.device
-                ) * self.embedding_appearance.mean(dim=0)
+        if self.training or self.use_train_appearance_embedding:
+            if TRAIN_INDICES in ray_samples.metadata:
+                embedded_appearance = self.embedding_appearance(ray_samples.metadata[TRAIN_INDICES].squeeze())
             else:
-                embedded_appearance = torch.zeros(
-                    (*directions.shape[:-1], self.appearance_embedding_dim), device=directions.device
-                )
+                embedded_appearance = self.embedding_appearance(camera_indices)
+        elif self.use_average_appearance_embedding:
+            embedded_appearance = torch.ones(
+                (*directions.shape[:-1], self.appearance_embedding_dim), device=directions.device
+            ) * self.embedding_appearance.mean(dim=0)
+        else:
+            embedded_appearance = torch.zeros(
+                (*directions.shape[:-1], self.appearance_embedding_dim), device=directions.device
+            )
 
         # transients
         if self.use_transient_embedding and self.training:

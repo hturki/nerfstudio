@@ -36,6 +36,7 @@ from nerfstudio.cameras.camera_optimizers import CameraOptimizerConfig
 from nerfstudio.cameras.cameras import CameraType
 from nerfstudio.cameras.rays import RayBundle
 from nerfstudio.configs.base_config import InstantiateConfig
+from nerfstudio.data.dataparsers.adop_dataparser import AdopDataParserConfig
 from nerfstudio.data.dataparsers.arkitscenes_dataparser import (
     ARKitScenesDataParserConfig,
 )
@@ -48,6 +49,7 @@ from nerfstudio.data.dataparsers.instant_ngp_dataparser import (
 )
 from nerfstudio.data.dataparsers.minimal_dataparser import MinimalDataParserConfig
 from nerfstudio.data.dataparsers.nerfosr_dataparser import NeRFOSRDataParserConfig
+from nerfstudio.data.dataparsers.multicam_dataparser import MulticamDataParserConfig
 from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataParserConfig
 from nerfstudio.data.dataparsers.nuscenes_dataparser import NuScenesDataParserConfig
 from nerfstudio.data.dataparsers.phototourism_dataparser import (
@@ -85,15 +87,19 @@ def variable_res_collate(batch: List[Dict]) -> Dict:
     images = []
     masks = []
     alphas = []
+    weights = []
     for data in batch:
         image = data.pop("image")
         mask = data.pop("mask", None)
         alpha = data.pop("alpha", None)
+        weight = data.pop("weights", None)
         images.append(image)
         if mask:
             masks.append(mask)
         if alpha is not None:
             alphas.append(alpha)
+        if weight is not None:
+            weight.append(weight)
 
     new_batch: dict = nerfstudio_collate(batch)
     new_batch["image"] = images
@@ -101,6 +107,8 @@ def variable_res_collate(batch: List[Dict]) -> Dict:
         new_batch["mask"] = masks
     if alphas:
         new_batch["alpha"] = alphas
+    if weights:
+        new_batch["weights"] = weights
 
     return new_batch
 
@@ -112,6 +120,8 @@ AnnotatedDataParserUnion = tyro.conf.OmitSubcommandPrefixes[  # Omit prefixes of
             "minimal-parser": MinimalDataParserConfig(),
             "arkit-data": ARKitScenesDataParserConfig(),
             "blender-data": BlenderDataParserConfig(),
+            "adop-data": AdopDataParserConfig(),
+            "multicam-data": MulticamDataParserConfig(),
             "instant-ngp-data": InstantNGPDataParserConfig(),
             "nuscenes-data": NuScenesDataParserConfig(),
             "dnerf-data": DNeRFDataParserConfig(),
@@ -394,7 +404,7 @@ class VanillaDataManager(DataManager):  # pylint: disable=abstract-method
         self,
         config: VanillaDataManagerConfig,
         device: Union[torch.device, str] = "cpu",
-        test_mode: Literal["test", "val", "inference"] = "val",
+        test_mode: Literal["test", "val", "inference"] = "test",
         world_size: int = 1,
         local_rank: int = 0,
         **kwargs,  # pylint: disable=unused-argument

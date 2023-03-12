@@ -81,7 +81,7 @@ class MipNerfModel(Model):
         self.renderer_depth = DepthRenderer()
 
         # losses
-        self.rgb_loss = MSELoss()
+        self.rgb_loss = MSELoss(reduction='none')
 
         # metrics
         self.psnr = PeakSignalNoiseRatio(data_range=1.0)
@@ -136,11 +136,23 @@ class MipNerfModel(Model):
         }
         return outputs
 
+    def get_metrics_dict(self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]) \
+            -> Dict[str, torch.Tensor]:
+        rgb_fine = outputs["rgb_fine"]
+        image = batch["image"].to(rgb_fine.device)
+        return {'psnr': self.psnr(image, rgb_fine)}
+
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
         image = batch["image"].to(self.device)
         rgb_loss_coarse = self.rgb_loss(image, outputs["rgb_coarse"])
         rgb_loss_fine = self.rgb_loss(image, outputs["rgb_fine"])
-        loss_dict = {"rgb_loss_coarse": rgb_loss_coarse, "rgb_loss_fine": rgb_loss_fine}
+
+        if "weights" in batch:
+            weights = batch["weights"].to(self.device).unsqueeze(-1).square()
+            rgb_loss_coarse *= weights
+            rgb_loss_fine *= weights
+
+        loss_dict = {"rgb_loss_coarse": rgb_loss_coarse.mean(), "rgb_loss_fine": rgb_loss_fine.mean()}
         loss_dict = misc.scale_dict(loss_dict, self.config.loss_coefficients)
         return loss_dict
 
@@ -188,5 +200,14 @@ class MipNerfModel(Model):
             "fine_ssim": float(fine_ssim.item()),
             "fine_lpips": float(fine_lpips.item()),
         }
+
         images_dict = {"img": combined_rgb, "accumulation": combined_acc, "depth": combined_depth}
+
+        if "weights" in batch:
+            weight = torch.unique(batch["weights"]).item()
+            for key, val in set(metrics_dict.items()):
+                metrics_dict[f"{key}_{weight}"] = val
+            for key, val in set(images_dict.items()):
+                images_dict[f"{key}_{weight}"] = val
+
         return metrics_dict, images_dict

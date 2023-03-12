@@ -144,7 +144,7 @@ class TCNNInstantNGPField(Field):
         # Rectifying the density with an exponential is much more stable than a ReLU or
         # softplus, because it enables high post-activation (float32) density outputs
         # from smaller internal (float16) parameters.
-        density = trunc_exp(density_before_activation.to(positions))
+        density = trunc_exp(density_before_activation.to(positions) - 1)
         return density, base_mlp_out
 
     def get_outputs(

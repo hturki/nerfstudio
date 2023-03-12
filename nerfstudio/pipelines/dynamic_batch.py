@@ -50,7 +50,7 @@ class DynamicBatchPipeline(VanillaPipeline):
         self,
         config: DynamicBatchPipelineConfig,
         device: str,
-        test_mode: Literal["test", "val", "inference"] = "val",
+        test_mode: Literal["test", "val", "inference"] = "test",
         world_size: int = 1,
         local_rank: int = 0,
     ):
@@ -67,7 +67,7 @@ class DynamicBatchPipeline(VanillaPipeline):
         if self.datamanager.train_pixel_sampler is not None:
             self.datamanager.train_pixel_sampler.set_num_rays_per_batch(self.dynamic_num_rays_per_batch)
         if self.datamanager.eval_pixel_sampler is not None:
-            self.datamanager.eval_pixel_sampler.set_num_rays_per_batch(self.dynamic_num_rays_per_batch)
+            self.datamanager.eval_pixel_sampler.set_num_rays_per_batch(min(self.dynamic_num_rays_per_batch, 2048))
 
     def _update_dynamic_num_rays_per_batch(self, num_samples_per_batch: int):
         """Updates the dynamic number of rays per batch variable,

@@ -16,16 +16,15 @@
 Proposal network field.
 """
 
-
 from typing import Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torchtyping import TensorType
 
 from nerfstudio.cameras.rays import RaySamples
 from nerfstudio.data.scene_box import SceneBox
-from nerfstudio.field_components.activations import trunc_exp
 from nerfstudio.field_components.spatial_distortions import SpatialDistortion
 from nerfstudio.fields.base_field import Field
 
@@ -48,17 +47,17 @@ class HashMLPDensityField(Field):
     """
 
     def __init__(
-        self,
-        aabb: TensorType,
-        num_layers: int = 2,
-        hidden_dim: int = 64,
-        spatial_distortion: Optional[SpatialDistortion] = None,
-        use_linear: bool = False,
-        num_levels: int = 8,
-        max_res: int = 1024,
-        base_res: int = 16,
-        log2_hashmap_size: int = 18,
-        features_per_level: int = 2,
+            self,
+            aabb: TensorType,
+            num_layers: int = 2,
+            hidden_dim: int = 64,
+            spatial_distortion: Optional[SpatialDistortion] = None,
+            use_linear: bool = False,
+            num_levels: int = 8,
+            max_res: int = 1024,
+            base_res: int = 16,
+            log2_hashmap_size: int = 18,
+            features_per_level: int = 2,
     ) -> None:
         super().__init__()
         self.register_buffer("aabb", aabb)
@@ -89,12 +88,30 @@ class HashMLPDensityField(Field):
         }
 
         if not self.use_linear:
-            self.mlp_base = tcnn.NetworkWithInputEncoding(
+            self.encoding = tcnn.Encoding(
                 n_input_dims=3,
-                n_output_dims=1,
-                encoding_config=config["encoding"],
-                network_config=config["network"],
+                encoding_config={
+                    'otype': 'HashGrid',
+                    'n_levels': num_levels,
+                    'n_features_per_level': features_per_level,
+                    'log2_hashmap_size': log2_hashmap_size,
+                    'base_resolution': base_res,
+                    'per_level_scale': growth_factor
+                }
             )
+
+            self.mlp_base = tcnn.Network(
+                n_input_dims=num_levels * features_per_level,
+                n_output_dims=1,
+                network_config={
+                    'otype': 'FullyFusedMLP',
+                    'activation': 'RELU',
+                    'output_activation': 'None',
+                    'n_neurons': hidden_dim,
+                    'n_hidden_layers': num_layers - 1,
+                }
+            )
+
         else:
             self.encoding = tcnn.Encoding(n_input_dims=3, encoding_config=config["encoding"])
             self.linear = torch.nn.Linear(self.encoding.n_output_dims, 1)
@@ -111,16 +128,18 @@ class HashMLPDensityField(Field):
         positions_flat = positions.view(-1, 3)
         if not self.use_linear:
             density_before_activation = (
-                self.mlp_base(positions_flat).view(*ray_samples.frustums.shape, -1).to(positions)
+                self.mlp_base(self.encoding(positions_flat)).view(*ray_samples.frustums.shape, -1).to(positions)
             )
         else:
             x = self.encoding(positions_flat).to(positions)
             density_before_activation = self.linear(x).view(*ray_samples.frustums.shape, -1)
 
-        # Rectifying the density with an exponential is much more stable than a ReLU or
-        # softplus, because it enables high post-activation (float32) density outputs
-        # from smaller internal (float16) parameters.
-        density = trunc_exp(density_before_activation)
+        # # Rectifying the density with an exponential is much more stable than a ReLU or
+        # # softplus, because it enables high post-activation (float32) density outputs
+        # # from smaller internal (float16) parameters.
+        # density = trunc_exp(density_before_activation)
+
+        density = F.softplus(density_before_activation - 1)
         density = density * selector[..., None]
         return density, None
 

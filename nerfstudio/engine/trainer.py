@@ -66,7 +66,7 @@ class TrainerConfig(ExperimentConfig):
     """Number of steps between saves."""
     steps_per_eval_batch: int = 500
     """Number of steps between randomly sampled batches of rays."""
-    steps_per_eval_image: int = 500
+    steps_per_eval_image: int = 1000
     """Number of steps between single eval images."""
     steps_per_eval_all_images: int = 25000
     """Number of steps between eval all images."""
@@ -129,7 +129,7 @@ class Trainer:
 
         self.viewer_state = None
 
-    def setup(self, test_mode: Literal["test", "val", "inference"] = "val") -> None:
+    def setup(self, test_mode: Literal["test", "val", "inference"] = "test") -> None:
         """Setup the Trainer by calling other setup functions.
 
         Args:

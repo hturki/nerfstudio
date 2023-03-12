@@ -171,10 +171,13 @@ class Model(nn.Module):
         image_height, image_width = camera_ray_bundle.origins.shape[:2]
         num_rays = len(camera_ray_bundle)
         outputs_lists = defaultdict(list)
+
         for i in range(0, num_rays, num_rays_per_chunk):
             start_idx = i
             end_idx = i + num_rays_per_chunk
             ray_bundle = camera_ray_bundle.get_row_major_sliced_ray_bundle(start_idx, end_idx)
+            if 'ignore_levels' in camera_ray_bundle.metadata:
+                ray_bundle.metadata['ignore_levels'] = camera_ray_bundle.metadata['ignore_levels']
             outputs = self.forward(ray_bundle=ray_bundle)
             for output_name, output in outputs.items():  # type: ignore
                 outputs_lists[output_name].append(output)

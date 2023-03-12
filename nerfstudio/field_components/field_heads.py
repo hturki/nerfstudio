@@ -40,6 +40,9 @@ class FieldHeadNames(Enum):
     SDF = "sdf"
     ALPHA = "alpha"
     GRADIENT = "gradient"
+    LEVELS = "levels"
+    LEVEL_COUNTS = "level_counts"
+    PIXEL_AREAS = "pixel_areas"
 
 
 class FieldHead(FieldComponent):

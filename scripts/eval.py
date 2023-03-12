@@ -8,6 +8,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import torch
 import tyro
 from rich.console import Console
 
@@ -25,6 +26,7 @@ class ComputePSNR:
     # Name of the output file.
     output_path: Path = Path("output.json")
 
+    @torch.inference_mode()
     def main(self) -> None:
         """Main function."""
         config, pipeline, checkpoint_path = eval_setup(self.load_config)
@@ -38,6 +40,8 @@ class ComputePSNR:
             "checkpoint": str(checkpoint_path),
             "results": metrics_dict,
         }
+
+        self.output_path = self.load_config.parent / 'output.json'
         # Save output to output file
         self.output_path.write_text(json.dumps(benchmark_info, indent=2), "utf8")
         CONSOLE.print(f"Saved results to: {self.output_path}")

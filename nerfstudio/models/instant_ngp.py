@@ -18,13 +18,15 @@ Implementation of Instant NGP.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Type
 
 import nerfacc
 import torch
+import torch.nn.functional as F
 from nerfacc import ContractionType
-from torch.nn import Parameter
+from torch.nn import Parameter, SmoothL1Loss
 from torchmetrics import PeakSignalNoiseRatio
 from torchmetrics.functional import structural_similarity_index_measure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
@@ -38,7 +40,6 @@ from nerfstudio.engine.callbacks import (
 )
 from nerfstudio.field_components.field_heads import FieldHeadNames
 from nerfstudio.fields.instant_ngp_field import TCNNInstantNGPField
-from nerfstudio.model_components.losses import MSELoss
 from nerfstudio.model_components.ray_samplers import VolumetricSampler
 from nerfstudio.model_components.renderers import (
     AccumulationRenderer,
@@ -46,8 +47,8 @@ from nerfstudio.model_components.renderers import (
     RGBRenderer,
 )
 from nerfstudio.models.base_model import Model, ModelConfig
-from nerfstudio.utils import colormaps
-
+from nerfstudio.utils import colormaps, colors
+from nerfstudio.utils.colors import get_color
 
 @dataclass
 class InstantNGPModelConfig(ModelConfig):
@@ -77,12 +78,14 @@ class InstantNGPModelConfig(ModelConfig):
     """Minimum step size for rendering."""
     near_plane: float = 0.05
     """How far along ray to start sampling."""
-    far_plane: float = 1e3
+    far_plane: Optional[float] = 1e3
     """How far along ray to stop sampling."""
     use_appearance_embedding: bool = False
     """Whether to use an appearance embedding."""
     background_color: Literal["random", "black", "white"] = "random"
     """The color that is given to untrained areas."""
+
+    train_with_random_bg: bool = False
 
 
 class NGPModel(Model):
@@ -101,6 +104,14 @@ class NGPModel(Model):
     def populate_modules(self):
         """Set the fields and modules."""
         super().populate_modules()
+
+        self.config.render_step_size = (
+            (self.scene_box.aabb[1] - self.scene_box.aabb[0]).max()
+            * math.sqrt(3)
+            / self.config.max_num_samples_per_ray
+        ).item()
+
+        print('Render step size', self.config.render_step_size)
 
         self.field = TCNNInstantNGPField(
             aabb=self.scene_box.aabb,
@@ -129,12 +140,16 @@ class NGPModel(Model):
         )
 
         # renderers
-        self.renderer_rgb = RGBRenderer(background_color=self.config.background_color)
+        self.background_color = "random"
+        if self.config.background_color in ["white", "black"]:
+            self.background_color = colors.COLORS_DICT[self.config.background_color]
+
+        self.renderer_rgb = RGBRenderer(background_color=self.background_color)
         self.renderer_accumulation = AccumulationRenderer()
         self.renderer_depth = DepthRenderer(method="expected")
 
         # losses
-        self.rgb_loss = MSELoss()
+        self.rgb_loss = SmoothL1Loss()#reduction='none')
 
         # metrics
         self.psnr = PeakSignalNoiseRatio(data_range=1.0)
@@ -161,11 +176,18 @@ class NGPModel(Model):
         ]
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
-        param_groups = {}
-        if self.field is None:
-            raise ValueError("populate_fields() must be called before get_param_groups")
-        param_groups["fields"] = list(self.field.parameters())
-        return param_groups
+        # mlps = []
+        # fields = []
+        # for name, child in self.field.named_children():
+        #     if 'mlp' in name:
+        #         mlps += child.parameters()
+        #     else:
+        #         fields += child.parameters()
+
+        return {
+            # 'mlps': mlps,
+            'fields': list(self.field.parameters()),
+        }
 
     def get_outputs(self, ray_bundle: RayBundle):
         assert self.field is not None
@@ -191,12 +213,22 @@ class NGPModel(Model):
             t_ends=ray_samples.frustums.ends,
         )
 
+        if self.config.train_with_random_bg:
+            if self.training:
+                self.renderer_rgb.background_color = "random_and_return"
+            else:
+                self.renderer_rgb.background_color = self.background_color
+
         rgb = self.renderer_rgb(
             rgb=field_outputs[FieldHeadNames.RGB],
             weights=weights,
             ray_indices=ray_indices,
             num_rays=num_rays,
         )
+
+        if self.config.train_with_random_bg and self.training:
+            rgb, rand_bg = rgb
+
         depth = self.renderer_depth(
             weights=weights, ray_samples=ray_samples, ray_indices=ray_indices, num_rays=num_rays
         )
@@ -210,27 +242,43 @@ class NGPModel(Model):
             "alive_ray_mask": alive_ray_mask,  # the rays we kept from sampler
             "num_samples_per_ray": packed_info[:, 1],
         }
+
+        if self.config.train_with_random_bg and self.training:
+            outputs["rand_bg"] = rand_bg
+
         return outputs
 
     def get_metrics_dict(self, outputs, batch):
-
-        image = batch["image"].to(self.device)
+        image = self._get_image(batch, outputs)
         metrics_dict = {}
-        metrics_dict["psnr"] = self.psnr(outputs["rgb"], image)
+        rgb = outputs["rgb"]
+        assert torch.isfinite(rgb).all(), rgb
+        mask = outputs["alive_ray_mask"]
+        metrics_dict["alive_ray_mask"] = mask.sum()
+
+        metrics_dict["mse"] = F.mse_loss(rgb[mask], image[mask])
+        metrics_dict["psnr"] = self.psnr(rgb[mask], image[mask])
         metrics_dict["num_samples_per_batch"] = outputs["num_samples_per_ray"].sum()
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
-        image = batch["image"].to(self.device)
+        image = self._get_image(batch, outputs)
         mask = outputs["alive_ray_mask"]
+
         rgb_loss = self.rgb_loss(image[mask], outputs["rgb"][mask])
-        loss_dict = {"rgb_loss": rgb_loss}
+        # if "weights" in batch:
+        #     weights = batch["weights"].to(self.device).unsqueeze(-1)
+        #     rgb_loss *= weights[mask].square()
+
+        loss_dict = {"rgb_loss": rgb_loss}#.mean()}
+        # import pdb; pdb.set_trace()
         return loss_dict
 
     def get_image_metrics_and_images(
         self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
     ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
-        image = batch["image"].to(self.device)
+        image = self._get_image(batch, outputs)
+
         rgb = outputs["rgb"]
         acc = colormaps.apply_colormap(outputs["accumulation"])
         depth = colormaps.apply_depth_colormap(
@@ -263,4 +311,21 @@ class NGPModel(Model):
             "alive_ray_mask": combined_alive_ray_mask,
         }
 
+        if "weights" in batch:
+            weight = torch.unique(batch["weights"]).item()
+            for key, val in set(metrics_dict.items()):
+                metrics_dict[f"{key}_{weight}"] = val
+            for key, val in set(images_dict.items()):
+                images_dict[f"{key}_{weight}"] = val
+
         return metrics_dict, images_dict
+
+    def _get_image(self, batch: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        image = batch["image"].to(self.device)
+
+        if self.config.train_with_random_bg:
+            alpha = batch["alpha"].to(self.device)
+            bg = outputs["rand_bg"] if self.training else get_color(self.config.background_color).to(self.device)
+            image = image * alpha + bg * (1.0 - alpha)
+
+        return image

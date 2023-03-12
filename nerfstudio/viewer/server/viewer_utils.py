@@ -256,7 +256,7 @@ class ViewerState:
         self.vis = None
         self.viewer_url = None
         self.log_filename = log_filename
-        self.datapath = datapath.parent if datapath.is_file() else datapath
+        self.datapath = Path('test') #datapath.parent if datapath.is_file() else datapath
         if self.config.launch_bridge_server:
             # start the viewer bridge server
             if self.config.websocket_port is None:

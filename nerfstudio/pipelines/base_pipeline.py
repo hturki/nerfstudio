@@ -44,6 +44,7 @@ from nerfstudio.data.datamanagers.base_datamanager import (
     VanillaDataManager,
     VanillaDataManagerConfig,
 )
+from nerfstudio.data.dataparsers.adop_dataparser import TRAIN_INDICES
 from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttributes
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import profiler
@@ -108,7 +109,7 @@ class Pipeline(nn.Module):
         return self.model.device
 
     def load_state_dict(self, state_dict: Mapping[str, Any], strict: bool = True):
-        model_state = {key[len("_model.") :]: value for key, value in state_dict.items() if key.startswith("_model.")}
+        model_state = {key[len("_model."):]: value for key, value in state_dict.items() if key.startswith("_model.")}
         pipeline_state = {key: value for key, value in state_dict.items() if not key.startswith("_model.")}
         self._model.load_state_dict(model_state, strict=strict)
         super().load_state_dict(pipeline_state, strict=False)
@@ -175,7 +176,7 @@ class Pipeline(nn.Module):
         """
 
     def get_training_callbacks(
-        self, training_callback_attributes: TrainingCallbackAttributes
+            self, training_callback_attributes: TrainingCallbackAttributes
     ) -> List[TrainingCallback]:
         """Returns the training callbacks from both the Dataloader and the Model."""
 
@@ -218,12 +219,12 @@ class VanillaPipeline(Pipeline):
     """
 
     def __init__(
-        self,
-        config: VanillaPipelineConfig,
-        device: str,
-        test_mode: Literal["test", "val", "inference"] = "val",
-        world_size: int = 1,
-        local_rank: int = 0,
+            self,
+            config: VanillaPipelineConfig,
+            device: str,
+            test_mode: Literal["test", "val", "inference"] = "test",
+            world_size: int = 1,
+            local_rank: int = 0,
     ):
         super().__init__()
         self.config = config
@@ -333,11 +334,11 @@ class VanillaPipeline(Pipeline):
         metrics_dict_list = []
         num_images = len(self.datamanager.fixed_indices_eval_dataloader)
         with Progress(
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TimeElapsedColumn(),
-            MofNCompleteColumn(),
-            transient=True,
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TimeElapsedColumn(),
+                MofNCompleteColumn(),
+                transient=True,
         ) as progress:
             task = progress.add_task("[green]Evaluating all eval images...", total=num_images)
             for camera_ray_bundle, batch in self.datamanager.fixed_indices_eval_dataloader:
@@ -345,6 +346,14 @@ class VanillaPipeline(Pipeline):
                 inner_start = time()
                 height, width = camera_ray_bundle.shape
                 num_rays = height * width
+                camera_ray_bundle.metadata['ignore_levels'] = True
+
+                if hasattr(self.datamanager,
+                           'eval_dataparser_outputs') and TRAIN_INDICES in self.datamanager.eval_dataparser_outputs.metadata:
+                    train_indices = self.datamanager.eval_dataparser_outputs.metadata[TRAIN_INDICES].to(
+                        camera_ray_bundle.camera_indices.device)
+                    camera_ray_bundle.metadata[TRAIN_INDICES] = train_indices[camera_ray_bundle.camera_indices]
+
                 outputs = self.model.get_outputs_for_camera_ray_bundle(camera_ray_bundle)
                 metrics_dict, _ = self.model.get_image_metrics_and_images(outputs, batch)
                 assert "num_rays_per_sec" not in metrics_dict
@@ -356,9 +365,13 @@ class VanillaPipeline(Pipeline):
                 progress.advance(task)
         # average the metrics list
         metrics_dict = {}
-        for key in metrics_dict_list[0].keys():
+        metric_keys = set()
+        for metrics_dict in metrics_dict_list:
+            metric_keys.update(metrics_dict.keys())
+        for key in metric_keys:
             metrics_dict[key] = float(
-                torch.mean(torch.tensor([metrics_dict[key] for metrics_dict in metrics_dict_list]))
+                torch.mean(torch.tensor([metrics_dict[key] for metrics_dict in
+                                         filter(lambda x: key in x, metrics_dict_list)]))
             )
         self.train()
         return metrics_dict
@@ -371,13 +384,13 @@ class VanillaPipeline(Pipeline):
             step: training step of the loaded checkpoint
         """
         state = {
-            (key[len("module.") :] if key.startswith("module.") else key): value for key, value in loaded_state.items()
+            (key[len("module."):] if key.startswith("module.") else key): value for key, value in loaded_state.items()
         }
         self._model.update_to_step(step)
         self.load_state_dict(state, strict=True)
 
     def get_training_callbacks(
-        self, training_callback_attributes: TrainingCallbackAttributes
+            self, training_callback_attributes: TrainingCallbackAttributes
     ) -> List[TrainingCallback]:
         """Returns the training callbacks from both the Dataloader and the Model."""
         datamanager_callbacks = self.datamanager.get_training_callbacks(training_callback_attributes)

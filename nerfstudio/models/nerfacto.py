@@ -59,6 +59,7 @@ from nerfstudio.model_components.renderers import (
 from nerfstudio.model_components.scene_colliders import NearFarCollider
 from nerfstudio.model_components.shaders import NormalsShader
 from nerfstudio.models.base_model import Model, ModelConfig
+from nerfstudio.models.mip_instant_ngp import ssim
 from nerfstudio.utils import colormaps
 
 
@@ -85,7 +86,7 @@ class NerfactoModelConfig(ModelConfig):
     """Maximum resolution of the hashmap for the base mlp."""
     log2_hashmap_size: int = 19
     """Size of the hashmap for the base mlp"""
-    num_proposal_samples_per_ray: Tuple[int, ...] = (256, 96)
+    num_proposal_samples_per_ray: Tuple[int, ...] = (256, 512)
     """Number of samples per ray for each proposal network."""
     num_nerf_samples_per_ray: int = 48
     """Number of samples per ray for the nerf network."""
@@ -97,12 +98,12 @@ class NerfactoModelConfig(ModelConfig):
     """Number of proposal network iterations."""
     use_same_proposal_network: bool = False
     """Use the same proposal network. Otherwise use different ones."""
-    proposal_net_args_list: List[Dict] = field(
-        default_factory=lambda: [
-            {"hidden_dim": 16, "log2_hashmap_size": 17, "num_levels": 5, "max_res": 128, "use_linear": False},
-            {"hidden_dim": 16, "log2_hashmap_size": 17, "num_levels": 5, "max_res": 256, "use_linear": False},
-        ]
-    )
+    # proposal_net_args_list: List[Dict] = field(
+    #     default_factory=lambda: [
+    #         {"hidden_dim": 16, "log2_hashmap_size": 17, "num_levels": 5, "max_res": 128, "use_linear": False},
+    #         {"hidden_dim": 16, "log2_hashmap_size": 17, "num_levels": 5, "max_res": 256, "use_linear": False},
+    #     ]
+    # )
     """Arguments for the proposal density fields."""
     proposal_initial_sampler: Literal["piecewise", "uniform"] = "piecewise"
     """Initial sampler for the proposal network. Piecewise is preferred for unbounded scenes."""
@@ -116,8 +117,11 @@ class NerfactoModelConfig(ModelConfig):
     """Predicted normal loss multiplier."""
     use_proposal_weight_anneal: bool = True
     """Whether to use proposal weight annealing."""
-    use_average_appearance_embedding: bool = True
+
+    use_train_appearance_embedding: bool = True
+    use_average_appearance_embedding: bool = False
     """Whether to use average appearance embedding or zeros for inference."""
+
     proposal_weights_anneal_slope: float = 10.0
     """Slope of the annealing function for the proposal weights."""
     proposal_weights_anneal_max_num_iters: int = 1000
@@ -160,6 +164,7 @@ class NerfactoModel(Model):
             spatial_distortion=scene_contraction,
             num_images=self.num_train_data,
             use_pred_normals=self.config.predict_normals,
+            use_train_appearance_embedding=self.config.use_train_appearance_embedding,
             use_average_appearance_embedding=self.config.use_average_appearance_embedding,
         )
 
@@ -167,15 +172,27 @@ class NerfactoModel(Model):
         num_prop_nets = self.config.num_proposal_iterations
         # Build the proposal network(s)
         self.proposal_networks = torch.nn.ModuleList()
+
+        proposal_net_args_list = []
+        for i in range(num_prop_nets, 0, -1):
+            proposal_net_args_list.append({
+                "hidden_dim": 16,
+                "log2_hashmap_size": self.config.log2_hashmap_size,
+                "num_levels": self.config.num_levels,
+                "base_res": 16,
+                "max_res": self.config.max_res // (2 ** (i - 1)),
+                "use_linear": False
+            })
+
         if self.config.use_same_proposal_network:
-            assert len(self.config.proposal_net_args_list) == 1, "Only one proposal network is allowed."
-            prop_net_args = self.config.proposal_net_args_list[0]
+            assert len(proposal_net_args_list) == 1, "Only one proposal network is allowed."
+            prop_net_args = proposal_net_args_list[0]
             network = HashMLPDensityField(self.scene_box.aabb, spatial_distortion=scene_contraction, **prop_net_args)
             self.proposal_networks.append(network)
             self.density_fns.extend([network.density_fn for _ in range(num_prop_nets)])
         else:
             for i in range(num_prop_nets):
-                prop_net_args = self.config.proposal_net_args_list[min(i, len(self.config.proposal_net_args_list) - 1)]
+                prop_net_args = proposal_net_args_list[min(i, len(proposal_net_args_list) - 1)]
                 network = HashMLPDensityField(
                     self.scene_box.aabb,
                     spatial_distortion=scene_contraction,
@@ -222,13 +239,14 @@ class NerfactoModel(Model):
 
         # metrics
         self.psnr = PeakSignalNoiseRatio(data_range=1.0)
-        self.ssim = structural_similarity_index_measure
+        self.ssim = ssim #structural_similarity_index_measure
         self.lpips = LearnedPerceptualImagePatchSimilarity(normalize=True)
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         param_groups = {}
         param_groups["proposal_networks"] = list(self.proposal_networks.parameters())
         param_groups["fields"] = list(self.field.parameters())
+
         return param_groups
 
     def get_training_callbacks(
@@ -311,6 +329,8 @@ class NerfactoModel(Model):
         metrics_dict["psnr"] = self.psnr(outputs["rgb"], image)
         if self.training:
             metrics_dict["distortion"] = distortion_loss(outputs["weights_list"], outputs["ray_samples_list"])
+            metrics_dict["interlevel"] = interlevel_loss(outputs["weights_list"], outputs["ray_samples_list"])
+
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
@@ -318,10 +338,9 @@ class NerfactoModel(Model):
         image = batch["image"].to(self.device)
         loss_dict["rgb_loss"] = self.rgb_loss(image, outputs["rgb"])
         if self.training:
-            loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * interlevel_loss(
-                outputs["weights_list"], outputs["ray_samples_list"]
-            )
             assert metrics_dict is not None and "distortion" in metrics_dict
+
+            loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * metrics_dict["interlevel"]
             loss_dict["distortion_loss"] = self.config.distortion_loss_mult * metrics_dict["distortion"]
             if self.config.predict_normals:
                 # orientation loss for computed normals

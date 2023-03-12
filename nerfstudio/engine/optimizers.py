@@ -18,7 +18,7 @@ Optimizers class.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Type, Tuple
 
 import torch
 from torch.cuda.amp.grad_scaler import GradScaler
@@ -58,6 +58,7 @@ class AdamOptimizerConfig(OptimizerConfig):
 
     _target: Type = torch.optim.Adam
     weight_decay: float = 0
+    # betas: Tuple[float] = (0.9, 0.99)
     """The weight decay to use."""
 
 

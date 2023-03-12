@@ -133,6 +133,7 @@ class PixelSampler:  # pylint: disable=too-few-public-methods
         all_indices = []
         all_images = []
         all_alphas = []
+        all_weights = []
 
         if "mask" in batch:
             num_rays_in_batch = num_rays_per_batch // num_images
@@ -151,6 +152,8 @@ class PixelSampler:  # pylint: disable=too-few-public-methods
                 all_images.append(batch["image"][i][indices[:, 1], indices[:, 2]])
                 if "alpha" in batch:
                     all_alphas.append(batch["alpha"][i][indices[:, 1], indices[:, 2]])
+                if "weights" in batch:
+                    all_weights.append(batch["weights"][i][indices[:, 1], indices[:, 2]])
         else:
             num_rays_in_batch = num_rays_per_batch // num_images
             for i in range(num_images):
@@ -163,6 +166,8 @@ class PixelSampler:  # pylint: disable=too-few-public-methods
                 all_images.append(batch["image"][i][indices[:, 1], indices[:, 2]])
                 if "alpha" in batch:
                     all_alphas.append(batch["alpha"][i][indices[:, 1], indices[:, 2]])
+                if "weights" in batch:
+                    all_weights.append(batch["weights"][i][indices[:, 1], indices[:, 2]])
 
         indices = torch.cat(all_indices, dim=0)
 
@@ -170,7 +175,7 @@ class PixelSampler:  # pylint: disable=too-few-public-methods
         collated_batch = {
             key: value[c, y, x]
             for key, value in batch.items()
-            if key != "image_idx" and key not in {"image", "mask", "alpha"} and value is not None
+            if key != "image_idx" and key not in {"image", "mask", "alpha", "weights"} and value is not None
         }
 
         collated_batch["image"] = torch.cat(all_images, dim=0)
@@ -180,6 +185,9 @@ class PixelSampler:  # pylint: disable=too-few-public-methods
         if "alpha" in batch:
             collated_batch["alpha"] = torch.cat(all_alphas, dim=0)
             assert collated_batch["alpha"].shape == (num_rays_per_batch, 1), collated_batch["alpha"].shape
+        if "weights" in batch:
+            collated_batch["weights"] = torch.cat(all_weights, dim=0)
+            assert collated_batch["weights"].shape == (num_rays_per_batch,), collated_batch["weights"].shape
 
         # Needed to correct the random indices to their actual camera idx locations.
         indices[:, 0] = batch["image_idx"][c]

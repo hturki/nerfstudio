@@ -413,7 +413,8 @@ class VolumetricSampler(Sampler):
             t_origins = origins[ray_indices]
             t_dirs = directions[ray_indices]
             positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
-            return density_fn(positions)
+            de = density_fn(positions)
+            return de
 
         return sigma_fn
 
@@ -469,15 +470,15 @@ class VolumetricSampler(Sampler):
             t_max=t_max,
             scene_aabb=self.scene_aabb,
             grid=self.occupancy_grid,
-            # this is a workaround - using density causes crash and damage quality. should be fixed
-            sigma_fn=None,  # self.get_sigma_fn(rays_o, rays_d),
+            sigma_fn=self.get_sigma_fn(rays_o, rays_d),
             render_step_size=render_step_size,
             near_plane=near_plane,
             far_plane=far_plane,
             stratified=self.training,
             cone_angle=cone_angle,
-            alpha_thre=1e-2,
+            alpha_thre=0,
         )
+
         num_samples = starts.shape[0]
         if num_samples == 0:
             # create a single fake sample and update packed_info accordingly
@@ -491,19 +492,21 @@ class VolumetricSampler(Sampler):
         if camera_indices is not None:
             camera_indices = camera_indices[ray_indices]
 
-        zeros = torch.zeros_like(origins[:, :1])
         ray_samples = RaySamples(
             frustums=Frustums(
                 origins=origins,
                 directions=dirs,
                 starts=starts,
                 ends=ends,
-                pixel_area=zeros,
+                pixel_area=ray_bundle[ray_indices].pixel_area,
             ),
             camera_indices=camera_indices,
         )
         if ray_bundle.times is not None:
             ray_samples.times = ray_bundle.times[ray_indices]
+
+        # import pdb; pdb.set_trace()
+
         return ray_samples, ray_indices
 
 
