@@ -92,7 +92,8 @@ def eval_setup(
 
     # load checkpoints from wherever they were saved
     # TODO: expose the ability to choose an arbitrary checkpoint
-    config.load_dir = config.get_checkpoint_dir()
+    if 'all-test' not in str(config.get_checkpoint_dir()):
+        config.load_dir = config.get_checkpoint_dir()
     config.pipeline.datamanager.eval_image_indices = None
 
     # setup pipeline (which includes the DataManager)
@@ -101,7 +102,10 @@ def eval_setup(
     assert isinstance(pipeline, Pipeline)
     pipeline.eval()
 
-    # load checkpointed information
-    checkpoint_path = eval_load_checkpoint(config, pipeline)
+    if 'all-test' not in str(config.get_checkpoint_dir()):
+        # load checkpointed information
+        checkpoint_path = eval_load_checkpoint(config, pipeline)
+    else:
+        checkpoint_path = None
 
     return config, pipeline, checkpoint_path

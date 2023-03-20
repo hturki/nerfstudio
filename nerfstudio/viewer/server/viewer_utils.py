@@ -148,10 +148,10 @@ class RenderThread(threading.Thread):
                             [color["r"] / 255.0, color["g"] / 255.0, color["b"] / 255.0], device=self.graph.device
                         )
                     with renderers.background_color_override_context(background_color), torch.no_grad():
-                        outputs = self.graph.get_outputs_for_camera_ray_bundle(self.camera_ray_bundle)
+                        outputs = self.graph.get_outputs_for_camera_ray_bundle(self.camera_ray_bundle, self.state.prev_output_type)
                 else:
                     with torch.no_grad():
-                        outputs = self.graph.get_outputs_for_camera_ray_bundle(self.camera_ray_bundle)
+                        outputs = self.graph.get_outputs_for_camera_ray_bundle(self.camera_ray_bundle, self.state.prev_output_type)
         except Exception as e:  # pylint: disable=broad-except
             self.exc = e
 
@@ -189,6 +189,7 @@ class CheckThread(threading.Thread):
             # check camera
             data = self.state.vis["renderingState/camera"].read()
             render_time = self.state.vis["renderingState/render_time"].read()
+            video_id = self.state.vis["renderingState/video_id"].read()
             if data is not None:
                 camera_object = data["object"]
                 if (
@@ -198,6 +199,7 @@ class CheckThread(threading.Thread):
                         and not self.state.prev_moving
                     )
                     or (render_time is not None and render_time != self.state.prev_render_time)
+                    or (video_id is not None and video_id != self.state.prev_video_id)
                 ):
                     self.state.check_interrupt_vis = True
                     self.state.prev_moving = True
@@ -281,6 +283,7 @@ class ViewerState:
         # viewer specific variables
         self.prev_camera_matrix = None
         self.prev_render_time = 0
+        self.prev_video_id = 0
         self.prev_output_type = OutputTypes.INIT
         self.prev_colormap_type = None
         self.prev_colormap_invert = False
@@ -458,6 +461,9 @@ class ViewerState:
         has_temporal_distortion = getattr(graph, "temporal_distortion", None) is not None
         self.vis["model/has_temporal_distortion"].write(str(has_temporal_distortion).lower())
 
+        max_video_id = getattr(graph, "max_video_id", None)
+        self.vis["model/max_video_id"].write(str(max_video_id if max_video_id is not None else "0").lower())
+
         is_training = self.vis["renderingState/isTraining"].read()
         self.step = step
 
@@ -529,22 +535,43 @@ class ViewerState:
 
         camera_object = data["object"]
         render_time = self.vis["renderingState/render_time"].read()
+        video_id = self.vis["renderingState/video_id"].read()
 
         if render_time is not None:
-            if (
-                self.prev_camera_matrix is not None and np.allclose(camera_object["matrix"], self.prev_camera_matrix)
-            ) and (self.prev_render_time == render_time):
-                self.camera_moving = False
+            if video_id is not None:
+                if (
+                    self.prev_camera_matrix is not None and np.allclose(camera_object["matrix"], self.prev_camera_matrix)
+                ) and (self.prev_render_time == render_time) and (self.prev_video_id == video_id):
+                    self.camera_moving = False
+                else:
+                    self.prev_camera_matrix = camera_object["matrix"]
+                    self.prev_render_time = render_time
+                    self.prev_video_id = video_id
+                    self.camera_moving = True
             else:
-                self.prev_camera_matrix = camera_object["matrix"]
-                self.prev_render_time = render_time
-                self.camera_moving = True
+                if (
+                    self.prev_camera_matrix is not None and np.allclose(camera_object["matrix"], self.prev_camera_matrix)
+                ) and (self.prev_render_time == render_time):
+                    self.camera_moving = False
+                else:
+                    self.prev_camera_matrix = camera_object["matrix"]
+                    self.prev_render_time = render_time
+                    self.camera_moving = True
         else:
-            if self.prev_camera_matrix is not None and np.allclose(camera_object["matrix"], self.prev_camera_matrix):
-                self.camera_moving = False
+            if video_id is not None:
+                if self.prev_camera_matrix is not None and np.allclose(camera_object["matrix"], self.prev_camera_matrix) \
+                        and (self.prev_video_id == video_id):
+                    self.camera_moving = False
+                else:
+                    self.prev_camera_matrix = camera_object["matrix"]
+                    self.prev_video_id = video_id
+                    self.camera_moving = True
             else:
-                self.prev_camera_matrix = camera_object["matrix"]
-                self.camera_moving = True
+                if self.prev_camera_matrix is not None and np.allclose(camera_object["matrix"], self.prev_camera_matrix):
+                    self.camera_moving = False
+                else:
+                    self.prev_camera_matrix = camera_object["matrix"]
+                    self.camera_moving = True
 
         output_type = self.vis["renderingState/output_choice"].read()
         if output_type is None:
@@ -862,11 +889,12 @@ class ViewerState:
             cy=intrinsics_matrix[1, 2],
             camera_type=camera_type,
             camera_to_worlds=camera_to_world[None, ...],
-            times=torch.tensor([float(self.prev_render_time)]),
+            times=torch.tensor([float(self.prev_render_time) * 2 - 1]),
         )
         camera = camera.to(graph.device)
 
         camera_ray_bundle = camera.generate_rays(camera_indices=0, aabb_box=graph.render_aabb)
+        camera_ray_bundle.metadata["video_id"] = torch.ones_like(camera_ray_bundle.camera_indices, dtype=torch.int32) * self.prev_video_id
 
         graph.eval()
 

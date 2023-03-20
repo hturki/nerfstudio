@@ -50,6 +50,8 @@ export function RenderControls() {
     (state) => state.renderingState.targetTrainUtil,
   );
   const render_time = useSelector((state) => state.renderingState.renderTime);
+  const video_id = useSelector((state) => state.renderingState.videoId);
+  const [max_video_id, set_max_video_id] = useState(0);
   const crop_enabled = useSelector(
     (state) => state.renderingState.crop_enabled,
   );
@@ -74,6 +76,15 @@ export function RenderControls() {
     }
   };
   websocket.addEventListener('message', receive_temporal_dist);
+
+  const receive_max_video_id = (e) => {
+    const msg = msgpack.decode(new Uint8Array(e.data));
+    if (msg.path === '/model/max_video_id') {
+      set_max_video_id(parseInt(msg.data, 10));
+      websocket.removeEventListener('message', receive_max_video_id);
+    }
+  };
+  websocket.addEventListener('message', receive_max_video_id);
 
   const [, setControls] = useControls(
     () => ({
@@ -285,6 +296,21 @@ export function RenderControls() {
             },
           }
         : {}),
+      video_id: {
+        label: 'Video Id',
+        value: video_id,
+        min: 0,
+        max: max_video_id,
+        step: 1,
+        onChange: (v) => {
+          dispatch_and_send(
+              websocket,
+              dispatch,
+              'renderingState/video_id',
+              v
+          );
+        },
+      },
     }),
     [
       outputOptions,
@@ -296,6 +322,8 @@ export function RenderControls() {
       target_train_util,
       render_time,
       display_render_time,
+      video_id,
+      max_video_id,
       websocket, // need to re-render when websocket changes to use the new websocket
     ],
   );

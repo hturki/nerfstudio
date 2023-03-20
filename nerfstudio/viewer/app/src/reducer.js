@@ -48,6 +48,8 @@ const initialState = {
     vis_train_ratio: 'Paused',
     log_errors: '',
     renderTime: 0.0,
+    videoId: 0,
+    maxVideoId: 0,
 
     // export options
     clipping_enabled: true,
