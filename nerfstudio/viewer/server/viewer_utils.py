@@ -139,6 +139,14 @@ class RenderThread(threading.Thread):
         outputs = None
         try:
             with SetTrace(self.state.check_interrupt):
+                render_options = {'output_type': self.state.prev_output_type}
+                if self.state.prev_sigma_threshold is not None and self.state.prev_sigma_threshold > 0:
+                    render_options['sigma_threshold'] = self.state.prev_sigma_threshold
+                if self.state.prev_max_altitude is not None and self.state.prev_max_altitude > 0:
+                    render_options['max_altitude'] = self.state.prev_max_altitude
+                if self.state.prev_feature_filter is not None and len(self.state.prev_feature_filter) > 0:
+                    render_options['feature_filter'] = self.state.prev_feature_filter
+
                 if self.state.prev_crop_enabled:
                     color = self.state.prev_crop_bg_color
                     if color is None:
@@ -148,10 +156,10 @@ class RenderThread(threading.Thread):
                             [color["r"] / 255.0, color["g"] / 255.0, color["b"] / 255.0], device=self.graph.device
                         )
                     with renderers.background_color_override_context(background_color), torch.no_grad():
-                        outputs = self.graph.get_outputs_for_camera_ray_bundle(self.camera_ray_bundle, self.state.prev_output_type)
+                        outputs = self.graph.get_outputs_for_camera_ray_bundle(self.camera_ray_bundle, render_options)
                 else:
                     with torch.no_grad():
-                        outputs = self.graph.get_outputs_for_camera_ray_bundle(self.camera_ray_bundle, self.state.prev_output_type)
+                        outputs = self.graph.get_outputs_for_camera_ray_bundle(self.camera_ray_bundle, render_options)
         except Exception as e:  # pylint: disable=broad-except
             self.exc = e
 
@@ -190,6 +198,9 @@ class CheckThread(threading.Thread):
             data = self.state.vis["renderingState/camera"].read()
             render_time = self.state.vis["renderingState/render_time"].read()
             video_id = self.state.vis["renderingState/video_id"].read()
+            sigma_threshold = self.state.vis["renderingState/sigma_threshold"].read()
+            max_altitude = self.state.vis["renderingState/max_altitude"].read()
+            feature_filter = self.state.vis["renderingState/feature_filter"].read()
             if data is not None:
                 camera_object = data["object"]
                 if (
@@ -200,6 +211,9 @@ class CheckThread(threading.Thread):
                     )
                     or (render_time is not None and render_time != self.state.prev_render_time)
                     or (video_id is not None and video_id != self.state.prev_video_id)
+                    or (sigma_threshold is not None and sigma_threshold != self.state.prev_sigma_threshold)
+                    or (max_altitude is not None and max_altitude != self.state.prev_max_altitude)
+                    or (feature_filter is not None and feature_filter != self.state.prev_feature_filter)
                 ):
                     self.state.check_interrupt_vis = True
                     self.state.prev_moving = True
@@ -284,6 +298,9 @@ class ViewerState:
         self.prev_camera_matrix = None
         self.prev_render_time = 0
         self.prev_video_id = 0
+        self.prev_sigma_threshold = 0
+        self.prev_max_altitude = 0
+        self.prev_feature_filter = []
         self.prev_output_type = OutputTypes.INIT
         self.prev_colormap_type = None
         self.prev_colormap_invert = False
@@ -464,6 +481,9 @@ class ViewerState:
         max_video_id = getattr(graph, "max_video_id", None)
         self.vis["model/max_video_id"].write(str(max_video_id if max_video_id is not None else "0").lower())
 
+        has_feature_clusters = getattr(graph, "has_feature_clusters", None) is not None
+        self.vis["/model/has_feature_clusters"].write(str(has_feature_clusters).lower())
+
         is_training = self.vis["renderingState/isTraining"].read()
         self.step = step
 
@@ -536,42 +556,39 @@ class ViewerState:
         camera_object = data["object"]
         render_time = self.vis["renderingState/render_time"].read()
         video_id = self.vis["renderingState/video_id"].read()
+        sigma_threshold = self.vis["renderingState/sigma_threshold"].read()
+        max_altitude = self.vis["renderingState/max_altitude"].read()
+        feature_filter = self.vis["renderingState/feature_filter"].read()
 
         if render_time is not None:
-            if video_id is not None:
-                if (
-                    self.prev_camera_matrix is not None and np.allclose(camera_object["matrix"], self.prev_camera_matrix)
-                ) and (self.prev_render_time == render_time) and (self.prev_video_id == video_id):
-                    self.camera_moving = False
-                else:
-                    self.prev_camera_matrix = camera_object["matrix"]
-                    self.prev_render_time = render_time
-                    self.prev_video_id = video_id
-                    self.camera_moving = True
+            if (
+                self.prev_camera_matrix is not None and np.allclose(camera_object["matrix"], self.prev_camera_matrix)
+            ) and (self.prev_render_time == render_time) and (self.prev_video_id == video_id) \
+                    and (self.prev_sigma_threshold == sigma_threshold) and (self.prev_max_altitude == max_altitude) \
+                    and (self.prev_feature_filter == feature_filter):
+                self.camera_moving = False
             else:
-                if (
-                    self.prev_camera_matrix is not None and np.allclose(camera_object["matrix"], self.prev_camera_matrix)
-                ) and (self.prev_render_time == render_time):
-                    self.camera_moving = False
-                else:
-                    self.prev_camera_matrix = camera_object["matrix"]
-                    self.prev_render_time = render_time
-                    self.camera_moving = True
+                self.prev_camera_matrix = camera_object["matrix"]
+                self.prev_render_time = render_time
+                if video_id is not None:
+                    self.prev_video_id = video_id
+                self.prev_sigma_threshold = sigma_threshold
+                self.prev_max_altitude = max_altitude
+                self.prev_feature_filter = feature_filter
+                self.camera_moving = True
         else:
-            if video_id is not None:
-                if self.prev_camera_matrix is not None and np.allclose(camera_object["matrix"], self.prev_camera_matrix) \
-                        and (self.prev_video_id == video_id):
-                    self.camera_moving = False
-                else:
-                    self.prev_camera_matrix = camera_object["matrix"]
-                    self.prev_video_id = video_id
-                    self.camera_moving = True
+            if self.prev_camera_matrix is not None and np.allclose(camera_object["matrix"], self.prev_camera_matrix) \
+                    and (self.prev_video_id == video_id) and (self.prev_sigma_threshold == sigma_threshold) \
+                    and (self.prev_feature_filter == max_altitude) and (self.prev_feature_filter == feature_filter):
+                self.camera_moving = False
             else:
-                if self.prev_camera_matrix is not None and np.allclose(camera_object["matrix"], self.prev_camera_matrix):
-                    self.camera_moving = False
-                else:
-                    self.prev_camera_matrix = camera_object["matrix"]
-                    self.camera_moving = True
+                self.prev_camera_matrix = camera_object["matrix"]
+                if video_id is not None:
+                    self.prev_video_id = video_id
+                self.prev_sigma_threshold = sigma_threshold
+                self.prev_max_altitude = max_altitude
+                self.prev_feature_filter = feature_filter
+                self.camera_moving = True
 
         output_type = self.vis["renderingState/output_choice"].read()
         if output_type is None:

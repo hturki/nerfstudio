@@ -50,8 +50,11 @@ export function RenderControls() {
     (state) => state.renderingState.targetTrainUtil,
   );
   const render_time = useSelector((state) => state.renderingState.renderTime);
+  const feature_filter = useSelector((state) => state.renderingState.featureFilter);
   const video_id = useSelector((state) => state.renderingState.videoId);
-  const [max_video_id, set_max_video_id] = useState(0);
+  const sigma_threshold = useSelector((state) => state.renderingState.sigmaThreshold);
+  const max_altitude = useSelector((state) => state.renderingState.maxAltitude);
+
   const crop_enabled = useSelector(
     (state) => state.renderingState.crop_enabled,
   );
@@ -67,6 +70,8 @@ export function RenderControls() {
   const dispatch = useDispatch();
 
   const [display_render_time, set_display_render_time] = useState(false);
+  const [max_video_id, set_max_video_id] = useState(0);
+  const [display_feature_filter, set_display_feature_filter] = useState(false);
 
   const receive_temporal_dist = (e) => {
     const msg = msgpack.decode(new Uint8Array(e.data));
@@ -85,6 +90,15 @@ export function RenderControls() {
     }
   };
   websocket.addEventListener('message', receive_max_video_id);
+
+  const receive_feature_clusters = (e) => {
+    const msg = msgpack.decode(new Uint8Array(e.data));
+    if (msg.path === '/model/has_feature_clusters') {
+      set_display_feature_filter(msg.data === 'true');
+      websocket.removeEventListener('message', receive_feature_clusters);
+    }
+  };
+  websocket.addEventListener('message', receive_feature_clusters);
 
   const [, setControls] = useControls(
     () => ({
@@ -311,6 +325,63 @@ export function RenderControls() {
           );
         },
       },
+      sigma_threshold: {
+        label: 'Sigma Threshold',
+        value: sigma_threshold,
+        min: 0,
+        max: 1000,
+        step: 0.1,
+        onChange: (v) => {
+          dispatch_and_send(
+              websocket,
+              dispatch,
+              'renderingState/sigma_threshold',
+              v
+          );
+        },
+      },
+      max_altitude: {
+        label: 'Max Altitude',
+        value: max_altitude,
+        min: 0,
+        max: 1000,
+        step: 0.1,
+        onChange: (v) => {
+          dispatch_and_send(
+              websocket,
+              dispatch,
+              'renderingState/max_altitude',
+              v
+          );
+        },
+      },
+      ...(display_feature_filter
+        ? {
+            feature_filter: {
+              label: 'Feature Filter',
+              value: feature_filter,
+              // https://codereview.stackexchange.com/questions/242077/parsing-numbers-and-ranges-from-a-string-in-javascript
+              onChange: (v) => {
+                const numbers = [];
+                Array.from(v.matchAll(/(\d+)(?:-(\d+))?/g), (m) => m).forEach(([, beginStr, endStr]) => {
+                  const [begin, end] = [beginStr, endStr].map(Number);
+                  numbers.push(begin);
+                  if (endStr !== undefined) {
+                    for (let num = begin + 1; num <= end; num += 1) {
+                      numbers.push(num);
+                    }
+                  }
+                });
+                dispatch_and_send(
+                  websocket,
+                  dispatch,
+                  'renderingState/feature_filter',
+                  numbers
+                );
+              },
+            }
+          }
+        : {}),
     }),
     [
       outputOptions,
@@ -324,6 +395,10 @@ export function RenderControls() {
       display_render_time,
       video_id,
       max_video_id,
+      sigma_threshold,
+      max_altitude,
+      display_feature_filter,
+      feature_filter,
       websocket, // need to re-render when websocket changes to use the new websocket
     ],
   );
@@ -350,6 +425,7 @@ export function RenderControls() {
     crop_scale,
     crop_center,
     display_render_time,
+    display_feature_filter
   ]);
 
   return null;

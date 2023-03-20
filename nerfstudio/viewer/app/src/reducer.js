@@ -50,6 +50,9 @@ const initialState = {
     renderTime: 0.0,
     videoId: 0,
     maxVideoId: 0,
+    featureFilter: '',
+    sigmaThreshold: 0.0,
+    maxAltitude: 0.0,
 
     // export options
     clipping_enabled: true,
