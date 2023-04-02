@@ -6,6 +6,8 @@ from typing import Dict, List, Optional, Tuple, Type, Union, Literal
 
 import numpy as np
 import torch
+
+from nerfstudio.utils.comms import get_rank, get_world_size
 from rich.console import Console
 from torch.nn import Parameter
 from torch.utils.data import DistributedSampler, DataLoader
@@ -15,7 +17,7 @@ from nerfstudio.cameras.rays import RayBundle
 from nerfstudio.data.datamanagers.base_datamanager import DataManager, DataManagerConfig
 from nerfstudio.data.datamanagers.image_metadata import ImageMetadata
 from nerfstudio.data.datamanagers.random_subset_dataset import RandomSubsetDataset, RAY_INDEX
-from nerfstudio.data.dataparsers.adop_dataparser import AdopDataParserConfig, TRAIN_INDICES
+from nerfstudio.data.dataparsers.adop_dataparser import AdopDataParserConfig, TRAIN_INDICES, WEIGHTS
 from nerfstudio.data.dataparsers.base_dataparser import DataparserOutputs, DataParserConfig
 from nerfstudio.data.datasets.base_dataset import InputDataset
 from nerfstudio.data.utils.dataloaders import FixedIndicesEvalDataloader
@@ -49,8 +51,6 @@ class RandomSubsetDataManagerConfig(DataManagerConfig):
     Record3D."""
     items_per_chunk: int = 12800000
     """Number of entries to load into memory at a time"""
-    max_viewer_images: Optional[int] = 1000
-    """Maximum number of images to show in viewer"""
     local_cache_path: Optional[str] = "/scratch/hturki/mipnerfacto-cache"
     """Caches images and metadata in specific path if set."""
 
@@ -92,17 +92,7 @@ class RandomSubsetDataManager(DataManager):
         )
 
         self.iter_train_image_dataloader = iter([])
-
-        if len(self.train_dataparser_outputs.image_filenames) > self.config.max_viewer_images:
-            indices = set(
-                np.linspace(0, len(self.train_dataparser_outputs.image_filenames), self.config.max_viewer_images,
-                            endpoint=False, dtype=np.int32))
-            viewer_outputs = self.dataparser.get_dataparser_outputs(split='train', indices=indices)
-        else:
-            viewer_outputs = self.train_dataparser_outputs
-
-        self.train_dataset = InputDataset(viewer_outputs)
-
+        self.train_dataset = InputDataset(self.dataparser.get_dataparser_outputs(split='train', downsamples=[1]))
         self.eval_dataparser_outputs = self.dataparser.get_dataparser_outputs(split='test')
 
         self.eval_camera_optimizer = self.config.camera_optimizer.setup(
@@ -120,10 +110,15 @@ class RandomSubsetDataManager(DataManager):
 
     @cached_property
     def fixed_indices_eval_dataloader(self):
+        image_indices = []
+        for item_index in range(get_rank(), len(self.eval_dataparser_outputs.cameras), get_world_size()):
+            image_indices.append(item_index)
+
         return FixedIndicesEvalDataloader(
             input_dataset=InputDataset(self.eval_dataparser_outputs),
             device=self.device,
             num_workers=self.world_size * 4,
+            image_indices=image_indices
         )
 
     def _set_train_loader(self):
@@ -144,7 +139,8 @@ class RandomSubsetDataManager(DataManager):
         if self.world_size > 0:
             self.eval_sampler = DistributedSampler(self.eval_batch_dataset, self.world_size, self.local_rank)
             assert self.config.eval_num_rays_per_batch % self.world_size == 0
-            self.eval_batch_dataloader = DataLoader(self.eval_batch_dataset, batch_size=batch_size, sampler=self.eval_sampler,
+            self.eval_batch_dataloader = DataLoader(self.eval_batch_dataset, batch_size=batch_size,
+                                                    sampler=self.eval_sampler,
                                                     num_workers=0, pin_memory=True)
         else:
             self.eval_batch_dataloader = DataLoader(self.eval_batch_dataset, batch_size=batch_size,
@@ -162,6 +158,13 @@ class RandomSubsetDataManager(DataManager):
             batch = next(self.iter_train_image_dataloader)
 
         ray_bundle = self.train_ray_generator(batch[RAY_INDEX])
+
+        train_indices = self.train_dataparser_outputs.metadata[TRAIN_INDICES].to(ray_bundle.camera_indices.device)
+        ray_bundle.metadata[TRAIN_INDICES] = train_indices[ray_bundle.camera_indices]
+
+        weights = self.train_dataparser_outputs.metadata[WEIGHTS].to(ray_bundle.camera_indices.device)
+        ray_bundle.metadata[WEIGHTS] = weights[ray_bundle.camera_indices]
+
         return ray_bundle, batch
 
     def next_eval(self, step: int) -> Tuple[RayBundle, Dict]:
@@ -225,7 +228,8 @@ class RandomSubsetDataManager(DataManager):
         items = []
         for i in range(len(outputs.image_filenames)):
             items.append(
-                ImageMetadata(str(outputs.image_filenames[i]), outputs.cameras.width[i], outputs.cameras.height[i],
+                ImageMetadata(str(outputs.image_filenames[i]),
+                              outputs.cameras.width[i], outputs.cameras.height[i],
                               str(outputs.mask_filenames[i]) if outputs.mask_filenames is not None else None,
                               local_cache_path))
 

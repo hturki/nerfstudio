@@ -36,7 +36,7 @@ from nerfstudio.utils.io import load_from_json
 class MulticamDataParserConfig(DataParserConfig):
     _target: Type = field(default_factory=lambda: Multicam)
     """target class to instantiate"""
-    data: Path = Path("data/multiscale/mic")
+    data: Path = Path("data/multicam/mic")
     """Directory specifying location of data."""
     scale_factor: float = 1.0
     """How much to scale the camera origins by."""
@@ -55,12 +55,16 @@ class Multicam(DataParser):
         self.alpha_color = config.alpha_color
 
     def _generate_dataparser_outputs(self, split="train"):
-        if self.alpha_color is not None and self.alpha_color.casefold() != "none":
+        if split != 'train':
+            split = 'test'
+
+        if self.alpha_color.casefold() != "none":
             alpha_color_tensor = get_color(self.alpha_color)
         else:
             alpha_color_tensor = None
 
-        meta = load_from_json(self.data / "metadata.json")[split]
+        base_meta = load_from_json(self.data / "metadata.json")
+        meta = base_meta[split]
         image_filenames = []
         poses = []
         width = []
@@ -85,10 +89,13 @@ class Multicam(DataParser):
 
         # in x,y,z order
         camera_to_world[..., 3] *= self.scale_factor
-        radius = 1.3 if "ship" not in str(self.data) else 1.5
-        scene_box = SceneBox(
-            aabb=torch.tensor([[-radius, -radius, -radius], [radius, radius, radius]], dtype=torch.float32)
-        )
+        if "scene_bounds" in base_meta:
+            bounds = torch.FloatTensor(base_meta["scene_bounds"])
+        else:
+            radius = 1.3 if "ship" not in str(self.data) else 1.5
+            bounds = torch.tensor([[-radius, -radius, -radius], [radius, radius, radius]], dtype=torch.float32)
+
+        scene_box = SceneBox(aabb=bounds)
 
         cameras = Cameras(
             camera_to_worlds=camera_to_world,
@@ -107,7 +114,7 @@ class Multicam(DataParser):
             alpha_color=alpha_color_tensor,
             scene_box=scene_box,
             dataparser_scale=self.scale_factor,
-            metadata={'weights': weights}
+            metadata={"weights": weights}
         )
 
         return dataparser_outputs

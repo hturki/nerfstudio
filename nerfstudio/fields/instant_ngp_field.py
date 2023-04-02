@@ -104,7 +104,7 @@ class TCNNInstantNGPField(Field):
             encoding_config={
                 "otype": "HashGrid",
                 "n_levels": num_levels,
-                "n_features_per_level": 2,
+                "n_features_per_level": 8,
                 "log2_hashmap_size": log2_hashmap_size,
                 "base_resolution": base_res,
                 "per_level_scale": per_level_scale,

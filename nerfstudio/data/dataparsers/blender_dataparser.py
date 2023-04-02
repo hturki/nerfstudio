@@ -63,6 +63,9 @@ class Blender(DataParser):
         self.alpha_color = config.alpha_color
 
     def _generate_dataparser_outputs(self, split="train"):
+        if split != 'train':
+            split = 'test'
+
         if self.alpha_color.casefold() != "none":
             alpha_color_tensor = get_color(self.alpha_color)
         else:

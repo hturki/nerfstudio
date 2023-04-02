@@ -22,9 +22,6 @@ from typing import Dict
 
 import tyro
 from nerfacc import ContractionType
-from nerfstudio.data.datamanagers.variable_res_datamanager import (
-    VariableResDataManagerConfig,
-)
 
 from nerfstudio.cameras.camera_optimizers import CameraOptimizerConfig
 from nerfstudio.configs.base_config import ViewerConfig
@@ -33,8 +30,7 @@ from nerfstudio.data.datamanagers.depth_datamanager import DepthDataManagerConfi
 from nerfstudio.data.datamanagers.random_subset_datamanager import RandomSubsetDataManagerConfig
 from nerfstudio.data.datamanagers.sdf_datamanager import SDFDataManagerConfig
 from nerfstudio.data.datamanagers.semantic_datamanager import SemanticDataManagerConfig
-from nerfstudio.data.datamanagers.semantic_datamanager import SemanticDataManagerConfig
-from nerfstudio.data.datamanagers.weighted_variable_res_datamanager import WeightedVariableResDataManagerConfig
+from nerfstudio.data.datamanagers.weighted_datamanager import WeightedDataManagerConfig
 from nerfstudio.data.dataparsers.adop_dataparser import AdopDataParserConfig
 from nerfstudio.data.dataparsers.blender_dataparser import BlenderDataParserConfig
 from nerfstudio.data.dataparsers.dnerf_dataparser import DNeRFDataParserConfig
@@ -49,7 +45,7 @@ from nerfstudio.data.dataparsers.sitcoms3d_dataparser import Sitcoms3DDataParser
 from nerfstudio.engine.optimizers import AdamOptimizerConfig, RAdamOptimizerConfig
 from nerfstudio.engine.schedulers import (
     CosineDecaySchedulerConfig,
-    ExponentialDecaySchedulerConfig,
+    ExponentialDecaySchedulerConfig, MultiStepLRSchedulerConfig,
 )
 from nerfstudio.engine.trainer import TrainerConfig
 from nerfstudio.field_components.temporal_distortions import TemporalDistortionKind
@@ -112,11 +108,11 @@ method_configs["nerfacto"] = TrainerConfig(
     optimizers={
         "proposal_networks": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            'scheduler': CosineWithWarmupSchedulerConfig(training_steps=50000),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=50000),
         },
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            'scheduler': CosineWithWarmupSchedulerConfig(training_steps=50000),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=50000),
         },
     },
     # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
@@ -145,11 +141,11 @@ method_configs["mipnerfacto"] = TrainerConfig(
     optimizers={
         "mlps": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15, weight_decay=1e-8),
-            'scheduler': CosineWithWarmupSchedulerConfig(training_steps=50000),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=50000),
         },
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            'scheduler': CosineWithWarmupSchedulerConfig(training_steps=50000),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=50000),
         },
     },
     # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
@@ -245,21 +241,18 @@ method_configs["instant-ngp"] = TrainerConfig(
             "scheduler": None,
         }
     },
-    viewer=ViewerConfig(num_rays_per_chunk=64000),
-    vis="viewer",
+    # viewer=ViewerConfig(num_rays_per_chunk=64000),
+    # vis="viewer",
 )
 
 method_configs["instant-ngp-bounded"] = TrainerConfig(
     method_name="instant-ngp-bounded",
     steps_per_eval_batch=500,
-    steps_per_save=50000,
-    max_num_iterations=50001,
+    steps_per_save=2000,
+    max_num_iterations=20001,
     mixed_precision=True,
     pipeline=DynamicBatchPipelineConfig(
-        datamanager=WeightedVariableResDataManagerConfig(dataparser=MulticamDataParserConfig(),
-                                                         train_num_rays_per_batch=1 << 18),
-        # datamanager=WeightedVariableResDataManagerConfig(dataparser=BlenderDataParserConfig(),
-        #                                                  train_num_rays_per_batch=1 << 18),
+        datamanager=WeightedDataManagerConfig(dataparser=MulticamDataParserConfig(), train_num_rays_per_batch=8192),
         model=InstantNGPModelConfig(
             eval_num_rays_per_chunk=8192,
             contraction_type=ContractionType.AABB,
@@ -268,34 +261,162 @@ method_configs["instant-ngp-bounded"] = TrainerConfig(
             near_plane=0,
             far_plane=None,
             background_color="white",
-            cone_angle=0
+            cone_angle=0,
+            alpha_thre=0,
         ),
     ),
     optimizers={
-        # "mlps": {
-        #     "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),#, weight_decay=1e-6),
-        #     'scheduler': MultiStepLRConfig(),
-        # },
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=35000),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=20000),
         }
     },
     # viewer=ViewerConfig(num_rays_per_chunk=64000),
     # vis="viewer",
-    steps_per_eval_all_images=10000
+    steps_per_eval_all_images=20000
+)
+
+method_configs["instant-ngp-blender-a"] = TrainerConfig(
+    method_name="instant-ngp-blender-a",
+    steps_per_eval_batch=500,
+    steps_per_save=2000,
+    max_num_iterations=30001,
+    mixed_precision=True,
+    pipeline=DynamicBatchPipelineConfig(
+        datamanager=WeightedDataManagerConfig(dataparser=MulticamDataParserConfig(), train_num_rays_per_batch=8192),
+        model=InstantNGPModelConfig(
+            eval_num_rays_per_chunk=8192,
+            contraction_type=ContractionType.AABB,
+            render_step_size=0.001,
+            max_num_samples_per_ray=1024,
+            near_plane=0,
+            far_plane=None,
+            background_color="white",
+            cone_angle=0,
+            alpha_thre=0,
+        ),
+    ),
+    optimizers={
+        "fields": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
+        }
+    },
+    # viewer=ViewerConfig(num_rays_per_chunk=64000),
+    # vis="viewer",
+    steps_per_eval_all_images=30000
+)
+
+method_configs["mip-instant-ngp"] = TrainerConfig(
+    method_name="mip-instant-ngp",
+    steps_per_eval_batch=500,
+    steps_per_eval_image=4000,
+    steps_per_save=2000,
+    max_num_iterations=40001,
+    mixed_precision=True,
+    pipeline=VanillaPipelineConfig(
+        datamanager=RandomSubsetDataManagerConfig(
+            dataparser=AdopDataParserConfig(),
+            train_num_rays_per_batch=4096,
+            eval_num_rays_per_batch=4096,
+        ),
+        model=MipInstantNGPModelConfig(),
+    ),
+    optimizers={
+        "mlps": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=40000),
+        },
+        "fields": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=40000),
+        }
+    },
+    # viewer=ViewerConfig(num_rays_per_chunk=64000),
+    # vis="viewer",
+    steps_per_eval_all_images=40000
 )
 
 method_configs["mip-instant-ngp-bounded"] = TrainerConfig(
     method_name="mip-instant-ngp-bounded",
     steps_per_eval_batch=500,
-    steps_per_save=35000,
-    max_num_iterations=35001,
+    steps_per_save=2000,
+    max_num_iterations=20001,
     mixed_precision=True,
     pipeline=DynamicBatchPipelineConfig(
-        # datamanager=VanillaDataManagerConfig(dataparser=InstantNGPDataParserConfig(), train_num_rays_per_batch=8192),
-        datamanager=WeightedVariableResDataManagerConfig(dataparser=MulticamDataParserConfig(),
-                                                         train_num_rays_per_batch=8192),
+        datamanager=WeightedDataManagerConfig(dataparser=MulticamDataParserConfig(), train_num_rays_per_batch=8192),
+        model=MipInstantNGPModelConfig(
+            eval_num_rays_per_chunk=1024,
+            contraction_type=ContractionType.AABB,
+            max_num_samples_per_ray=1024,
+            near_plane=0,
+            far_plane=None,
+            background_color="white",
+            cone_angle=0,
+            alpha_thre=0,
+            grid_levels=1,
+            appearance_embedding_dim=0
+        ),
+    ),
+    optimizers={
+        "mlps": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=20000),
+        },
+        "fields": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=20000),
+        }
+    },
+    # viewer=ViewerConfig(num_rays_per_chunk=64000),
+    # vis="viewer",
+    steps_per_eval_all_images=20000
+)
+
+method_configs["mip-instant-ngp-bounded-step"] = TrainerConfig(
+    method_name="mip-instant-ngp-bounded-step",
+    steps_per_eval_batch=500,
+    steps_per_save=2000,
+    max_num_iterations=20001,
+    mixed_precision=True,
+    pipeline=DynamicBatchPipelineConfig(
+        datamanager=WeightedDataManagerConfig(dataparser=MulticamDataParserConfig(), train_num_rays_per_batch=8192),
+        model=MipInstantNGPModelConfig(
+            eval_num_rays_per_chunk=1024,
+            contraction_type=ContractionType.AABB,
+            max_num_samples_per_ray=1024,
+            near_plane=0,
+            far_plane=None,
+            background_color="white",
+            cone_angle=0,
+            alpha_thre=0,
+            grid_levels=1,
+            appearance_embedding_dim=0
+        ),
+    ),
+    optimizers={
+        "mlps": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            'scheduler': MultiStepLRSchedulerConfig(),
+        },
+        "fields": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            'scheduler': MultiStepLRSchedulerConfig(),
+        }
+    },
+    # viewer=ViewerConfig(num_rays_per_chunk=64000),
+    # vis="viewer",
+    steps_per_eval_all_images=20000
+)
+
+method_configs["mip-instant-ngp-blender-a"] = TrainerConfig(
+    method_name="mip-instant-ngp-blender-a",
+    steps_per_eval_batch=500,
+    steps_per_save=2000,
+    max_num_iterations=30001,
+    mixed_precision=True,
+    pipeline=DynamicBatchPipelineConfig(
+        datamanager=WeightedDataManagerConfig(dataparser=MulticamDataParserConfig(), train_num_rays_per_batch=8192),
         model=MipInstantNGPModelConfig(
             eval_num_rays_per_chunk=2048,
             contraction_type=ContractionType.AABB,
@@ -303,30 +424,32 @@ method_configs["mip-instant-ngp-bounded"] = TrainerConfig(
             near_plane=0,
             far_plane=None,
             background_color="white",
-            cone_angle=0
+            cone_angle=0,
+            alpha_thre=0,
+            grid_levels=1,
+            appearance_embedding_dim=0
         ),
     ),
     optimizers={
         "mlps": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=35000),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
         },
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=35000),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
         }
     },
     # viewer=ViewerConfig(num_rays_per_chunk=64000),
     # vis="viewer",
-    steps_per_eval_all_images=35000
+    steps_per_eval_all_images=30000
 )
 
 method_configs["mipnerf"] = TrainerConfig(
     method_name="mipnerf",
     pipeline=VanillaPipelineConfig(
         # datamanager=VanillaDataManagerConfig(dataparser=BlenderDataParserConfig(), train_num_rays_per_batch=4096),
-        datamanager=WeightedVariableResDataManagerConfig(dataparser=BlenderDataParserConfig(),
-                                                         train_num_rays_per_batch=4096),
+        datamanager=WeightedDataManagerConfig(dataparser=MulticamDataParserConfig(), train_num_rays_per_batch=8192),
         model=VanillaModelConfig(
             _target=MipNerfModel,
             loss_coefficients={"rgb_loss_coarse": 0.1, "rgb_loss_fine": 1.0},
@@ -373,9 +496,7 @@ method_configs["semantic-nerfw"] = TrainerConfig(
 method_configs["vanilla-nerf"] = TrainerConfig(
     method_name="vanilla-nerf",
     pipeline=VanillaPipelineConfig(
-        # datamanager=VanillaDataManagerConfig(dataparser=BlenderDataParserConfig(), train_num_rays_per_batch=4096),
-        datamanager=WeightedVariableResDataManagerConfig(dataparser=BlenderDataParserConfig(),
-                                                         train_num_rays_per_batch=4096),
+        datamanager=WeightedDataManagerConfig(dataparser=MulticamDataParserConfig(), train_num_rays_per_batch=8192),
         model=VanillaModelConfig(_target=NeRFModel,
                                  num_coarse_samples=64,
                                  num_importance_samples=128,
@@ -574,15 +695,16 @@ method_configs["kplanes"] = TrainerConfig(
     method_name="kplanes",
     steps_per_eval_batch=500,
     steps_per_save=2000,
-    max_num_iterations=50001,
+    max_num_iterations=30001,
+    steps_per_eval_all_images=30000,
     mixed_precision=True,
     pipeline=VanillaPipelineConfig(
-        datamanager=RandomSubsetDataManagerConfig(
-            dataparser=AdopDataParserConfig(),
+        datamanager=WeightedDataManagerConfig(
+            dataparser=MulticamDataParserConfig(),
             train_num_rays_per_batch=4096,
-            eval_num_rays_per_batch=2048,
+            eval_num_rays_per_batch=4096,
         ),
-        model=MipKPlanesModelConfig(eval_num_rays_per_chunk=4096),
+        model=KPlanesModelConfig(eval_num_rays_per_chunk=1 << 15),
     ),
     optimizers={
         "proposal_networks": {
@@ -594,8 +716,8 @@ method_configs["kplanes"] = TrainerConfig(
             "scheduler": CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
         },
     },
-    viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
-    vis="viewer",
+    # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+    # vis="viewer",
 )
 
 method_configs["kplanes-dynamic"] = TrainerConfig(
@@ -633,6 +755,39 @@ method_configs["kplanes-dynamic"] = TrainerConfig(
     },
     viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
     vis="viewer",
+)
+
+method_configs["kplanes-unbounded"] = TrainerConfig(
+    method_name="kplanes",
+    steps_per_eval_batch=500,
+    steps_per_save=2000,
+    max_num_iterations=50001,
+    mixed_precision=True,
+    pipeline=VanillaPipelineConfig(
+        datamanager=RandomSubsetDataManagerConfig(
+            dataparser=AdopDataParserConfig(),
+            train_num_rays_per_batch=4096,
+            eval_num_rays_per_batch=2048,
+        ),
+        model=KPlanesModelConfig(
+            near_plane=0.05,
+            far_plane=1000.0,
+            is_contracted=True,
+            eval_num_rays_per_chunk=4096
+        ),
+    ),
+    optimizers={
+        "proposal_networks": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            "scheduler": CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
+        },
+        "fields": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            "scheduler": CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
+        },
+    },
+    # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+    # vis="viewer",
 )
 
 external_methods, external_descriptions = discover_methods()

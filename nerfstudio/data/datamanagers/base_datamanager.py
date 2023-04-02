@@ -99,7 +99,7 @@ def variable_res_collate(batch: List[Dict]) -> Dict:
         if alpha is not None:
             alphas.append(alpha)
         if weight is not None:
-            weight.append(weight)
+            weights.append(weight)
 
     new_batch: dict = nerfstudio_collate(batch)
     new_batch["image"] = images

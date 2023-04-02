@@ -268,11 +268,10 @@ class TCNNNerfactoField(Field):
         outputs_shape = ray_samples.frustums.directions.shape[:-1]
 
         # appearance
-        if self.training or self.use_train_appearance_embedding:
-            if TRAIN_INDICES in ray_samples.metadata:
-                embedded_appearance = self.embedding_appearance(ray_samples.metadata[TRAIN_INDICES].squeeze())
-            else:
-                embedded_appearance = self.embedding_appearance(camera_indices)
+        if ray_samples.metadata is not None and TRAIN_INDICES in ray_samples.metadata:
+            embedded_appearance = self.embedding_appearance(ray_samples.metadata[TRAIN_INDICES].squeeze())
+        elif self.training:
+            embedded_appearance = self.embedding_appearance(ray_samples.camera_indices.squeeze())
         elif self.use_average_appearance_embedding:
             embedded_appearance = torch.ones(
                 (*directions.shape[:-1], self.appearance_embedding_dim), device=directions.device

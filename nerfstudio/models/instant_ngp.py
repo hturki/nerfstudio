@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Type
 
 import nerfacc
+import numpy as np
 import torch
 import torch.nn.functional as F
 from nerfacc import ContractionType
@@ -47,6 +48,7 @@ from nerfstudio.model_components.renderers import (
     RGBRenderer,
 )
 from nerfstudio.models.base_model import Model, ModelConfig
+from nerfstudio.models.mip_instant_ngp import ssim
 from nerfstudio.utils import colormaps, colors
 from nerfstudio.utils.colors import get_color
 
@@ -74,6 +76,8 @@ class InstantNGPModelConfig(ModelConfig):
     """Contraction type used for spatial deformation of the field."""
     cone_angle: float = 0.004
     """Should be set to 0.0 for blender scenes but 1./256 for real scenes."""
+    alpha_thre: float = 1e-2
+    """Alpha threshold for skipping empty space. Should be set to 0 for blender scenes."""
     render_step_size: float = 0.01
     """Minimum step size for rendering."""
     near_plane: float = 0.05
@@ -149,11 +153,11 @@ class NGPModel(Model):
         self.renderer_depth = DepthRenderer(method="expected")
 
         # losses
-        self.rgb_loss = SmoothL1Loss()#reduction='none')
+        self.rgb_loss = SmoothL1Loss(reduction='none')
 
         # metrics
         self.psnr = PeakSignalNoiseRatio(data_range=1.0)
-        self.ssim = structural_similarity_index_measure
+        self.ssim = ssim
         self.lpips = LearnedPerceptualImagePatchSimilarity(normalize=True)
 
     def get_training_callbacks(
@@ -176,16 +180,7 @@ class NGPModel(Model):
         ]
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
-        # mlps = []
-        # fields = []
-        # for name, child in self.field.named_children():
-        #     if 'mlp' in name:
-        #         mlps += child.parameters()
-        #     else:
-        #         fields += child.parameters()
-
         return {
-            # 'mlps': mlps,
             'fields': list(self.field.parameters()),
         }
 
@@ -200,6 +195,7 @@ class NGPModel(Model):
                 far_plane=self.config.far_plane,
                 render_step_size=self.config.render_step_size,
                 cone_angle=self.config.cone_angle,
+                alpha_thre=self.config.alpha_thre,
             )
 
         field_outputs = self.field(ray_samples)
@@ -213,38 +209,29 @@ class NGPModel(Model):
             t_ends=ray_samples.frustums.ends,
         )
 
-        if self.config.train_with_random_bg:
-            if self.training:
-                self.renderer_rgb.background_color = "random_and_return"
-            else:
-                self.renderer_rgb.background_color = self.background_color
+        outputs = {}
+        if self.training and self.config.train_with_random_bg:
+            background = torch.rand_like(ray_bundle.origins)
+            outputs["bg_color"] = background
+        else:
+            background = None
 
-        rgb = self.renderer_rgb(
+        outputs["rgb"] = self.renderer_rgb(
             rgb=field_outputs[FieldHeadNames.RGB],
             weights=weights,
             ray_indices=ray_indices,
             num_rays=num_rays,
+            background=background
         )
 
-        if self.config.train_with_random_bg and self.training:
-            rgb, rand_bg = rgb
-
-        depth = self.renderer_depth(
+        outputs["depth"] = self.renderer_depth(
             weights=weights, ray_samples=ray_samples, ray_indices=ray_indices, num_rays=num_rays
         )
+
         accumulation = self.renderer_accumulation(weights=weights, ray_indices=ray_indices, num_rays=num_rays)
-        alive_ray_mask = accumulation.squeeze(-1) > 0
-
-        outputs = {
-            "rgb": rgb,
-            "accumulation": accumulation,
-            "depth": depth,
-            "alive_ray_mask": alive_ray_mask,  # the rays we kept from sampler
-            "num_samples_per_ray": packed_info[:, 1],
-        }
-
-        if self.config.train_with_random_bg and self.training:
-            outputs["rand_bg"] = rand_bg
+        outputs["accumulation"]  = accumulation
+        outputs["alive_ray_mask"]  = accumulation.squeeze(-1) > 0
+        outputs["num_samples_per_ray"]  = packed_info[:, 1]
 
         return outputs
 
@@ -266,12 +253,11 @@ class NGPModel(Model):
         mask = outputs["alive_ray_mask"]
 
         rgb_loss = self.rgb_loss(image[mask], outputs["rgb"][mask])
-        # if "weights" in batch:
-        #     weights = batch["weights"].to(self.device).unsqueeze(-1)
-        #     rgb_loss *= weights[mask].square()
+        if "weights" in batch:
+            weights = batch["weights"].to(self.device).unsqueeze(-1)
+            rgb_loss *= weights[mask]
 
-        loss_dict = {"rgb_loss": rgb_loss}#.mean()}
-        # import pdb; pdb.set_trace()
+        loss_dict = {"rgb_loss": rgb_loss.mean()}
         return loss_dict
 
     def get_image_metrics_and_images(
@@ -292,24 +278,34 @@ class NGPModel(Model):
         combined_depth = torch.cat([depth], dim=1)
         combined_alive_ray_mask = torch.cat([alive_ray_mask], dim=1)
 
-        # Switch images from [H, W, C] to [1, C, H, W] for metrics computations
-        image = torch.moveaxis(image, -1, 0)[None, ...]
-        rgb = torch.moveaxis(rgb, -1, 0)[None, ...]
-
-        psnr = self.psnr(image, rgb)
-        ssim = self.ssim(image, rgb)
-        lpips = self.lpips(image, rgb)
-
-        # all of these metrics will be logged as scalars
-        metrics_dict = {"psnr": float(psnr.item()), "ssim": float(ssim), "lpips": float(lpips)}  # type: ignore
-        # TODO(ethan): return an image dictionary
-
         images_dict = {
             "img": combined_rgb,
             "accumulation": combined_acc,
             "depth": combined_depth,
             "alive_ray_mask": combined_alive_ray_mask,
         }
+
+        ssim = self.ssim(image, rgb)
+
+        # Switch images from [H, W, C] to [1, C, H, W] for metrics computations
+        image = torch.moveaxis(image, -1, 0)[None, ...]
+        rgb = torch.moveaxis(rgb, -1, 0)[None, ...]
+
+        psnr = self.psnr(image, rgb)
+        lpips = self.lpips(image, rgb)
+
+        mse = np.exp(-0.1 * np.log(10.) * float(psnr.item()))
+        dssim = np.sqrt((1 - float(ssim)) / 2)
+        avg_error = np.exp(np.mean(np.log(np.array([mse, dssim, float(lpips)]))))
+
+        # all of these metrics will be logged as scalars
+        # all of these metrics will be logged as scalars
+        metrics_dict = {
+            "psnr": float(psnr.item()),
+            "ssim": float(ssim),
+            "lpips": float(lpips),
+            "avg_error": avg_error
+        }  # type: ignore
 
         if "weights" in batch:
             weight = torch.unique(batch["weights"]).item()
@@ -325,7 +321,7 @@ class NGPModel(Model):
 
         if self.config.train_with_random_bg:
             alpha = batch["alpha"].to(self.device)
-            bg = outputs["rand_bg"] if self.training else get_color(self.config.background_color).to(self.device)
+            bg = outputs["bg_color"] if self.training else get_color(self.config.background_color).to(self.device)
             image = image * alpha + bg * (1.0 - alpha)
 
         return image

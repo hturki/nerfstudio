@@ -56,7 +56,6 @@ from nerfstudio.model_components.scene_colliders import NearFarCollider
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.models.kplanes import space_tv_loss
 from nerfstudio.models.mip_instant_ngp import ssim
-from nerfstudio.models.mipnerfacto import turbo_colormap_data
 from nerfstudio.utils import colormaps, misc
 from nerfstudio.utils.colors import get_color
 
@@ -369,7 +368,7 @@ class MipKPlanesModel(Model):
         if not self.training:
             for i in range(len(self.field.coo_combs)):
                 images_dict[f"levels_{i}"] = colormaps.apply_colormap(
-                    outputs[f"levels_{i}"] / len(self.config.multiscale_res), cmap=ListedColormap(turbo_colormap_data))
+                    outputs[f"levels_{i}"] / len(self.config.multiscale_res), cmap="turbo")
 
         ssim = self.ssim(image, rgb)
 

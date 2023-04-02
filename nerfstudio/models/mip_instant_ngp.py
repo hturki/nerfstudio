@@ -27,9 +27,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from nerfacc import ContractionType
+from rich.console import Console
 from torch.nn import Parameter, SmoothL1Loss
 from torchmetrics import PeakSignalNoiseRatio
-from torchmetrics.functional import structural_similarity_index_measure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from typing_extensions import Literal
 
@@ -40,7 +40,7 @@ from nerfstudio.engine.callbacks import (
     TrainingCallbackLocation,
 )
 from nerfstudio.field_components.field_heads import FieldHeadNames
-from nerfstudio.fields.mip_tcnn_field import MipTCNNField, EXPLICIT_LEVEL
+from nerfstudio.fields.mip_tcnn_field import MipTCNNField, EXPLICIT_LEVEL, interpolation_model
 from nerfstudio.model_components.ray_samplers import VolumetricSampler
 from nerfstudio.model_components.renderers import (
     AccumulationRenderer,
@@ -50,6 +50,8 @@ from nerfstudio.model_components.renderers import (
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import colormaps, colors
 from nerfstudio.utils.colors import get_color
+
+CONSOLE = Console(width=120)
 
 
 def ssim(
@@ -124,6 +126,7 @@ def ssim(
 
     return torch.mean(ssim_map.reshape([-1, num_channels * width * height]), dim=-1).item()
 
+
 @dataclass
 class MipInstantNGPModelConfig(ModelConfig):
     """Instant NGP Model Config"""
@@ -140,13 +143,17 @@ class MipInstantNGPModelConfig(ModelConfig):
     """Number of samples in field evaluation."""
     grid_resolution: int = 128
     """Resolution of the grid used for the field."""
+    grid_levels: int = 4
+    """Number of grid levels"""
     contraction_type: ContractionType = ContractionType.UN_BOUNDED_SPHERE
     """Contraction type used for spatial deformation of the field."""
     cone_angle: float = 0.004
     """Should be set to 0.0 for blender scenes but 1./256 for real scenes."""
-    near_plane: float = 0.05
+    alpha_thre: float = 1e-2
+    """Alpha threshold for skipping empty space. Should be set to 0 for blender scenes."""
+    near_plane: float = 0.02
     """How far along ray to start sampling."""
-    far_plane: Optional[float] = 1e3
+    far_plane: Optional[float] = None
     """Whether to use an appearance embedding."""
     background_color: Literal["random", "black", "white"] = "random"
     """The color that is given to untrained areas."""
@@ -156,16 +163,25 @@ class MipInstantNGPModelConfig(ModelConfig):
     """Feature dimension at each level."""
     base_resolution: int = 16
     """Base resolution of the hashmap for the base mlp."""
-    max_resolution: int = 1024
+    max_resolution: int = 65536
     """Maximum resolution of the hashmap for the base mlp."""
 
+    interpolation_model: Literal["mlp_rgb", "mlp_density", "feature"] = "mlp_rgb"
     use_frustum_area: bool = False
-    same_color_mlp: bool = False
-    interp_density_features: bool = False
-    grid_feature_scales: Optional[int] = None
+    same_color_mlp: bool = True
+    level_window: Optional[int] = None
+    training_level_jitter: float = 0
 
-    train_with_random_bg: bool = True
+    level_anneal: Optional[int] = None
+    level_anneal_cosine: bool = True
+
+    train_with_random_bg: bool = False
     use_sigma_fn: bool = True
+
+    appearance_embedding_dim: int = 32
+    use_train_appearance_embedding: bool = True
+    use_average_appearance_embedding: bool = True
+    """Whether to use average appearance embedding or zeros for inference."""
 
 
 class MipNGPModel(Model):
@@ -193,34 +209,45 @@ class MipNGPModel(Model):
         """Set the fields and modules."""
         super().populate_modules()
 
+        self.register_buffer("scene_aabb", self.scene_box.aabb.flatten())
+
+        if self.config.level_anneal == 0:
+            self.config.level_anneal = None
+
         self.field = MipTCNNField(
             aabb=self.scene_box.aabb,
             num_images=self.num_train_data,
             contraction_type=self.config.contraction_type,
+            appearance_embedding_dim=self.config.appearance_embedding_dim,
+            use_train_appearance_embedding=self.config.use_train_appearance_embedding,
+            use_average_appearance_embedding=self.config.use_average_appearance_embedding,
             features_per_level=self.config.features_per_level,
             num_levels=self.config.num_levels,
             base_resolution=self.config.base_resolution,
             max_resolution=self.config.max_resolution,
+            interpolation_model=interpolation_model(self.config.interpolation_model),
             use_frustum_area=self.config.use_frustum_area,
             same_color_mlp=self.config.same_color_mlp,
-            interp_density_features=self.config.interp_density_features,
-            grid_feature_scales=self.config.grid_feature_scales,
-            appearance_embedding_dim=0
+            level_window=self.config.level_window,
+            training_level_jitter=self.config.training_level_jitter,
+            level_anneal=self.config.level_anneal,
+            level_anneal_cosine=self.config.level_anneal_cosine,
         )
-
-        self.scene_aabb = Parameter(self.scene_box.aabb.flatten(), requires_grad=False)
 
         # Occupancy Grid
         self.occupancy_grid = nerfacc.OccupancyGrid(
             roi_aabb=self.scene_aabb,
             resolution=self.config.grid_resolution,
-            contraction_type=self.config.contraction_type,
+            # contraction_type=self.config.contraction_type,
+            levels=self.config.grid_levels
         )
 
+        if self.config.contraction_type != ContractionType.AABB:
+            self.occupancy_grid._contraction_type = self.config.contraction_type
+
         # Sampler
-        vol_sampler_aabb = self.scene_box.aabb if self.config.contraction_type == ContractionType.AABB else None
         self.sampler = VolumetricSampler(
-            scene_aabb=vol_sampler_aabb,
+            scene_aabb=enlarge_aabb(self.scene_box.aabb, self.config.grid_levels),
             occupancy_grid=self.occupancy_grid,
             density_fn=self.field.density_fn if self.config.use_sigma_fn else None,
         )
@@ -231,12 +258,11 @@ class MipNGPModel(Model):
             self.background_color = colors.COLORS_DICT[self.config.background_color]
 
         background_color = self.config.background_color
-        self.renderer_rgb = RGBRenderer(
-            background_color=background_color, return_background=self.config.train_with_random_bg
-        )
+        self.renderer_rgb = RGBRenderer(background_color=background_color)
         self.renderer_accumulation = AccumulationRenderer()
         self.renderer_depth = DepthRenderer(method="expected")
-        self.renderer_pixel_area = SemanticRenderer()
+        # self.renderer_pixel_area = SemanticRenderer()
+        self.renderer_level = SemanticRenderer()
 
         # losses
         self.rgb_loss = SmoothL1Loss(reduction='none')
@@ -257,13 +283,22 @@ class MipNGPModel(Model):
                 occ_eval_fn=lambda x: self.field.get_opacity(x, self.render_step_size),
             )
 
-        return [
+        callbacks = [
             TrainingCallback(
                 where_to_run=[TrainingCallbackLocation.BEFORE_TRAIN_ITERATION],
                 update_every_num_iters=1,
                 func=update_occupancy_grid,
             ),
         ]
+
+        if self.config.level_anneal is not None:
+            callbacks.append(TrainingCallback(
+                where_to_run=[TrainingCallbackLocation.BEFORE_TRAIN_ITERATION],
+                update_every_num_iters=1,
+                func=self.field.anneal_weights,
+            ))
+
+        return callbacks
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         mlps = []
@@ -280,15 +315,18 @@ class MipNGPModel(Model):
         }
 
     def get_outputs(self, ray_bundle: RayBundle):
-        outputs = self.get_outputs_inner(ray_bundle)
-        # if not self.training and (not ray_bundle.metadata.get('ignore_levels', False)):
-        #     num_levels = self.config.grid_feature_scales if self.config.grid_feature_scales is not None else self.config.num_levels
-        #     for i in range(num_levels):
-        #         level_outputs = self.get_outputs_inner(ray_bundle, i)
-        #         outputs[f"rgb_level_{i}"] = level_outputs["rgb"]
-        #         outputs[f"depth_level_{i}"] = level_outputs["depth"]
+        with torch.inference_mode(not self.training):
+            outputs = self.get_outputs_inner(ray_bundle)
+            # Last condition is just to only visualize multiple levels on blender for now
+            if not self.training and (not ray_bundle.metadata.get('ignore_levels', False)) \
+                    and self.config.contraction_type == ContractionType.AABB:
+                num_levels = len(self.field.areas)
+                for i in range(num_levels):
+                    level_outputs = self.get_outputs_inner(ray_bundle, i)
+                    outputs[f"rgb_level_{i}"] = level_outputs["rgb"]
+                    outputs[f"depth_level_{i}"] = level_outputs["depth"]
 
-        return outputs
+            return outputs
 
     def get_outputs_inner(self, ray_bundle: RayBundle, explicit_level: Optional[int] = None):
         assert self.field is not None
@@ -301,6 +339,7 @@ class MipNGPModel(Model):
                 far_plane=self.config.far_plane,
                 render_step_size=self.render_step_size,
                 cone_angle=self.config.cone_angle,
+                alpha_thre=self.config.alpha_thre,
             )
 
         if explicit_level is not None:
@@ -319,32 +358,24 @@ class MipNGPModel(Model):
             t_ends=ray_samples.frustums.ends,
         )
 
+        outputs = {}
         if self.training and self.config.train_with_random_bg:
-            standard_bg_color = self.renderer_rgb.background_color
-            self.renderer_rgb.background_color = "random"
+            background = torch.rand_like(ray_bundle.origins)
+            outputs["bg_color"] = background
+        else:
+            background = None
 
-        rgb = self.renderer_rgb(
+        outputs["rgb"] = self.renderer_rgb(
             rgb=field_outputs[FieldHeadNames.RGB],
             weights=weights,
             ray_indices=ray_indices,
             num_rays=num_rays,
+            background=background
         )
 
-        if self.config.train_with_random_bg:
-            rgb, bg_color = rgb
-
-        depth = self.renderer_depth(
+        outputs["depth"] = self.renderer_depth(
             weights=weights, ray_samples=ray_samples, ray_indices=ray_indices, num_rays=num_rays
         )
-
-        outputs = {
-            "rgb": rgb,
-            "depth": depth,
-        }
-
-        if self.training and self.config.train_with_random_bg:
-            self.renderer_rgb.background_color = standard_bg_color
-            outputs["bg_color"] = bg_color
 
         if self.training:
             outputs["level_counts"] = field_outputs[FieldHeadNames.LEVEL_COUNTS]
@@ -354,6 +385,9 @@ class MipNGPModel(Model):
             #     ray_indices=ray_indices,
             #     num_rays=num_rays,
             # )
+        elif explicit_level is None:
+            outputs["levels"] = self.renderer_level(weights=weights, semantics=field_outputs[FieldHeadNames.LEVELS],
+                                                    ray_indices=ray_indices, num_rays=num_rays)
 
         if explicit_level is None:
             accumulation = self.renderer_accumulation(weights=weights, ray_indices=ray_indices, num_rays=num_rays)
@@ -425,6 +459,9 @@ class MipNGPModel(Model):
             "alive_ray_mask": combined_alive_ray_mask,
         }
 
+        if not self.training:
+            images_dict["levels"] = colormaps.apply_colormap(outputs["levels"] / self.config.num_levels, cmap="turbo")
+
         for i in range(self.config.num_levels):
             if f"rgb_level_{i}" in outputs:
                 images_dict[f"rgb_level_{i}"] = torch.cat([image, outputs[f"rgb_level_{i}"]], dim=1)
@@ -473,3 +510,9 @@ class MipNGPModel(Model):
             image = image * alpha + bg * (1.0 - alpha)
 
         return image
+
+
+def enlarge_aabb(aabb: torch.Tensor, factor: float) -> torch.Tensor:
+    center = (aabb[0] + aabb[1]) / 2
+    extent = (aabb[1] - aabb[0]) / 2
+    return torch.cat([center - extent * factor, center + extent * factor])

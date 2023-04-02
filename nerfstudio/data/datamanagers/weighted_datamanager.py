@@ -19,24 +19,22 @@ Semantic datamanager.
 from dataclasses import dataclass, field
 from typing import Type
 
-from nerfstudio.data.datamanagers.variable_res_datamanager import variable_res_collate
-
 from nerfstudio.data.datamanagers.base_datamanager import (
     VanillaDataManager,
-    VanillaDataManagerConfig,
+    VanillaDataManagerConfig, variable_res_collate,
 )
 from nerfstudio.data.datasets.weighted_dataset import WeightedDataset
 
 
 @dataclass
-class WeightedVariableResDataManagerConfig(VanillaDataManagerConfig):
+class WeightedDataManagerConfig(VanillaDataManagerConfig):
     """A semantic datamanager - required to use with .setup()"""
 
-    _target: Type = field(default_factory=lambda: WeightedVariableResDataManager)
+    _target: Type = field(default_factory=lambda: WeightedDataManager)
     collate_fn = staticmethod(variable_res_collate)
 
 
-class WeightedVariableResDataManager(VanillaDataManager):  # pylint: disable=abstract-method
+class WeightedDataManager(VanillaDataManager):  # pylint: disable=abstract-method
     """Data manager implementation for data that also requires processing semantic data.
 
     Args:

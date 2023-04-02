@@ -44,11 +44,10 @@ except ImportError:
 CONSOLE = Console(width=120)
 
 
-
 def interpolate_ms_features(
-    pts: torch.Tensor,
-    grid_encodings: Iterable[KPlanesEncoding],
-    concat_features: bool,
+        pts: torch.Tensor,
+        grid_encodings: Iterable[KPlanesEncoding],
+        concat_features: bool,
 ) -> torch.Tensor:
     """Combines/interpolates features across multiple dimensions and scales.
     Args:
@@ -95,19 +94,19 @@ class KPlanesField(Field):
     """
 
     def __init__(
-        self,
-        aabb: TensorType,
-        num_images: int,
-        geo_feat_dim: int = 15,
-        concat_features_across_scales: bool = True,
-        grid_base_resolution: List[int] = field(default_factory=lambda: [128, 128, 128]),
-        grid_feature_dim: int = 32,
-        multiscale_res: List[int] = field(default_factory=lambda: [1, 2, 4]),
-        spatial_distortion: Optional[SpatialDistortion] = None,
-        appearance_embedding_dim: int = 0,
-        use_average_appearance_embedding: bool = True,
-        linear_decoder: bool = False,
-        linear_decoder_layers: Optional[int] = None,
+            self,
+            aabb: TensorType,
+            num_images: int,
+            geo_feat_dim: int = 15,
+            concat_features_across_scales: bool = True,
+            grid_base_resolution: List[int] = field(default_factory=lambda: [128, 128, 128]),
+            grid_feature_dim: int = 32,
+            multiscale_res: List[int] = field(default_factory=lambda: [1, 2, 4]),
+            spatial_distortion: Optional[SpatialDistortion] = None,
+            appearance_embedding_dim: int = 0,
+            use_average_appearance_embedding: bool = True,
+            linear_decoder: bool = False,
+            linear_decoder_layers: Optional[int] = None,
             use_train_appearance_embedding: bool = True,
     ) -> None:
 
@@ -217,12 +216,12 @@ class KPlanesField(Field):
 
         if self.spatial_distortion is not None:
             grid_input = self.spatial_distortion(grid_input)
-            if False or self.use_tcnn:
+            if False:  # or self.use_tcnn:
                 grid_input = (grid_input + 2.0) / 4.0
             else:
                 grid_input = grid_input / 2  # from [-2, 2] to [-1, 1]
         else:
-            if False or self.use_tcnn:
+            if False:  # or self.use_tcnn:
                 grid_input = contract(x=grid_input, roi=self.aabb, type=ContractionType.AABB)
             else:
                 # Input should be in [-1, 1]
@@ -313,12 +312,12 @@ class KPlanesDensityField(Field):
     """
 
     def __init__(
-        self,
-        aabb: TensorType,
-        resolution: List[int],
-        num_output_coords: int,
-        spatial_distortion: Optional[SpatialDistortion] = None,
-        linear_decoder: bool = False,
+            self,
+            aabb: TensorType,
+            resolution: List[int],
+            num_output_coords: int,
+            spatial_distortion: Optional[SpatialDistortion] = None,
+            linear_decoder: bool = False,
     ):
         super().__init__()
 

@@ -18,10 +18,11 @@
 
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, Type
+from typing import Optional, Type, List
 
 import numpy as np
 from torch.optim import Optimizer, lr_scheduler
+from torch.optim.lr_scheduler import ChainedScheduler, LinearLR, MultiStepLR
 from typing_extensions import Literal
 
 from nerfstudio.configs.base_config import InstantiateConfig
@@ -95,8 +96,8 @@ class ExponentialDecayScheduler(Scheduler):
                     )
                 else:
                     lr = (
-                        self.config.lr_pre_warmup
-                        + (lr_init - self.config.lr_pre_warmup) * step / self.config.warmup_steps
+                            self.config.lr_pre_warmup
+                            + (lr_init - self.config.lr_pre_warmup) * step / self.config.warmup_steps
                     )
             else:
                 t = np.clip(
@@ -140,3 +141,34 @@ class CosineDecayScheduler(Scheduler):
 
         scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=func)
         return scheduler
+
+
+@dataclass
+class MultiStepLRSchedulerConfig(SchedulerConfig):
+    """Basic scheduler config with self-defined exponential decay schedule"""
+
+    _target: Type = field(default_factory=lambda: MultiStepLRScheduler)
+    start_factor: float = 0.01
+    linear_steps: int = 100
+    milestones: List[int] = field(default_factory=lambda: [10000, 15000, 18000])
+    gamma: float = 0.33
+
+
+class MultiStepLRScheduler(Scheduler):
+    """Starts with a flat lr schedule until it reaches N epochs then applies a given scheduler"""
+
+    config: MultiStepLRSchedulerConfig
+
+    def get_scheduler(self, optimizer: Optimizer, lr_init: float) -> lr_scheduler._LRScheduler:
+        return ChainedScheduler(
+            [
+                LinearLR(
+                    optimizer, start_factor=self.config.start_factor, total_iters=self.config.linear_steps
+                ),
+                MultiStepLR(
+                    optimizer,
+                    milestones=self.config.milestones,
+                    gamma=self.config.gamma,
+                ),
+            ]
+        )

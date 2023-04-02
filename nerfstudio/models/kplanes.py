@@ -141,7 +141,7 @@ class KPlanesModelConfig(ModelConfig):
     """The background color as RGB."""
 
     train_with_random_bg: bool = True
-    """Use a randomzied background during training"""
+    """Use a randomized background during training"""
 
     loss_coefficients: Dict[str, float] = to_immutable_dict(
         {
@@ -157,9 +157,6 @@ class KPlanesModelConfig(ModelConfig):
         }
     )
     """Loss coefficients."""
-
-    use_tcnn: bool = False
-    tcnn_type: str = "DenseGrid"
 
 
 class KPlanesModel(Model):
@@ -194,8 +191,6 @@ class KPlanesModel(Model):
             use_average_appearance_embedding=self.config.use_average_appearance_embedding,
             linear_decoder=self.config.linear_decoder,
             linear_decoder_layers=self.config.linear_decoder_layers,
-            use_tcnn=self.config.use_tcnn,
-            tcnn_type=self.config.tcnn_type,
         )
 
         self.density_fns = []
@@ -209,8 +204,6 @@ class KPlanesModel(Model):
                 self.scene_box.aabb,
                 spatial_distortion=scene_contraction,
                 linear_decoder=self.config.linear_decoder,
-                use_tcnn=self.config.use_tcnn,
-                tcnn_type=self.config.tcnn_type,
                 **prop_net_args,
             )
             self.proposal_networks.append(network)

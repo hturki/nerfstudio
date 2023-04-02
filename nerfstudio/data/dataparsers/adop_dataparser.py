@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Type
+from typing import Type, List, Optional
 
 import numpy as np
 import torch
@@ -42,6 +42,7 @@ DOWN_TO_FORWARD = torch.DoubleTensor([[1, 0, 0, 0],
                                       [0, 0, 0, 1]])
 
 TRAIN_INDICES = "train_indices"
+WEIGHTS = "weights"
 
 
 @dataclass
@@ -57,6 +58,7 @@ class AdopDataParserConfig(DataParserConfig):
     train_split: float = 0.9
 
     train_with_adop_data: bool = True
+    downsamples: List[int] = field(default_factory=lambda: [1])
 
 
 @dataclass
@@ -68,7 +70,10 @@ class Adop(DataParser):
         self.data: Path = config.data
         self.scale_factor: float = config.scale_factor
 
-    def _generate_dataparser_outputs(self, split="train"):
+    def get_dataparser_outputs(self, split="train", downsamples:Optional[List[int]] = None):
+        if downsamples is None:
+            downsamples = self.config.downsamples
+
         with (self.config.data / "images.txt").open() as f:
             image_paths = f.readlines()
 
@@ -135,21 +140,53 @@ class Adop(DataParser):
 
         # in x,y,z order
         c2ws[..., 3] *= self.scale_factor
-        scene_box = SceneBox(aabb=(torch.stack([min_bounds, max_bounds]) - origin) / pose_scale_factor)
+        scene_box = SceneBox(aabb=((torch.stack([min_bounds, max_bounds]) - origin) / pose_scale_factor).float())
 
         train_indices = set(np.linspace(0, len(image_paths), int(len(image_paths) * self.config.train_split),
                                         endpoint=False, dtype=np.int32))
+
         if split.casefold() == 'train':
-            indices = torch.arange(len(image_paths))
+            cameras_width = []
+            cameras_height = []
+            cameras_fx = []
+            cameras_fy = []
+            cameras_cx = []
+            cameras_cy = []
+            train_indices = []
+            weights = []
             if self.config.train_with_val_images:
                 mask_filenames = None
             else:
                 mask_filenames = []
                 for i in range(len(image_paths)):
-                    if i in train_indices:
-                        mask_filenames.append(self.data / 'image_full.png')
-                    else:
-                        mask_filenames.append(self.data / 'image_left.png')
+                    for j in downsamples:
+                        train_indices.append(i)
+                        cameras_width.append(width[i] // j)
+                        cameras_height.append(height[i] // j)
+                        cameras_fx.append(fx[i] / j)
+                        cameras_fy.append(fy[i] / j)
+                        cameras_cx.append(cx[i] / j)
+                        cameras_cy.append(cy[i] / j)
+                        weights.append(j ** 2)
+
+                        if i in train_indices:
+                            mask_filenames.append(self.data / 'image_full.png')
+                        else:
+                            mask_filenames.append(self.data / 'image_left.png')
+
+            indices = torch.LongTensor(train_indices)
+            weights = torch.FloatTensor(weights)
+
+            cameras = Cameras(
+                camera_to_worlds=c2ws[indices].float(),
+                fx=torch.FloatTensor(cameras_fx),
+                fy=torch.FloatTensor(cameras_fy),
+                cx=torch.FloatTensor(cameras_cx),
+                cy=torch.FloatTensor(cameras_cy),
+                width=torch.LongTensor(cameras_width),
+                height=torch.LongTensor(cameras_height),
+                camera_type=CameraType.PERSPECTIVE,
+            )
         else:
             val_indices = []
             mask_filenames = []
@@ -159,19 +196,24 @@ class Adop(DataParser):
                     mask_filenames.append(self.data / 'image_right.png')
 
             indices = torch.LongTensor(val_indices)
+            weights = None
+
+            cameras = Cameras(
+                camera_to_worlds=c2ws[indices].float(),
+                fx=torch.FloatTensor(fx)[indices],
+                fy=torch.FloatTensor(fy)[indices],
+                cx=torch.FloatTensor(cx)[indices],
+                cy=torch.FloatTensor(cy)[indices],
+                width=torch.IntTensor(width)[indices],
+                height=torch.IntTensor(height)[indices],
+                camera_type=CameraType.PERSPECTIVE,
+            )
 
         print('Num images in split {}: {}'.format(split, len(indices)))
 
-        cameras = Cameras(
-            camera_to_worlds=c2ws[indices].float(),
-            fx=torch.FloatTensor(fx)[indices],
-            fy=torch.FloatTensor(fy)[indices],
-            cx=torch.FloatTensor(cx)[indices],
-            cy=torch.FloatTensor(cy)[indices],
-            width=torch.IntTensor(width)[indices],
-            height=torch.IntTensor(height)[indices],
-            camera_type=CameraType.PERSPECTIVE,
-        )
+        metadata = {TRAIN_INDICES: indices}
+        if weights is not None:
+            metadata[WEIGHTS] = weights
 
         dataparser_outputs = DataparserOutputs(
             image_filenames=[image_filenames[i] for i in indices],
@@ -179,7 +221,7 @@ class Adop(DataParser):
             scene_box=scene_box,
             dataparser_scale=self.scale_factor,
             mask_filenames=mask_filenames,
-            metadata={TRAIN_INDICES: indices}
+            metadata=metadata
         )
 
         return dataparser_outputs

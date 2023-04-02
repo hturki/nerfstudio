@@ -383,7 +383,7 @@ class VolumetricSampler(Sampler):
     def __init__(
         self,
         occupancy_grid: Optional[OccupancyGrid] = None,
-        density_fn: Optional[Callable[[TensorType[..., 3]], TensorType[..., 1]]] = None,
+        density_fn: Optional[Callable[[TensorType[..., 3], Optional[TensorType[..., 1]]], TensorType[..., 1]]] = None,
         scene_aabb: Optional[TensorType[2, 3]] = None,
     ) -> None:
 
@@ -413,7 +413,7 @@ class VolumetricSampler(Sampler):
             t_origins = origins[ray_indices]
             t_dirs = directions[ray_indices]
             positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
-            de = density_fn(positions)
+            de = density_fn(positions, None)
             return de
 
         return sigma_fn
@@ -431,6 +431,7 @@ class VolumetricSampler(Sampler):
         near_plane: float = 0.0,
         far_plane: Optional[float] = None,
         cone_angle: float = 0.0,
+        alpha_thre: float = 1e-2,
     ) -> Tuple[RaySamples, TensorType["total_samples",]]:
         """Generate ray samples in a bounding box.
 
@@ -476,7 +477,7 @@ class VolumetricSampler(Sampler):
             far_plane=far_plane,
             stratified=self.training,
             cone_angle=cone_angle,
-            alpha_thre=0,
+            alpha_thre=alpha_thre,
         )
 
         num_samples = starts.shape[0]
@@ -505,7 +506,11 @@ class VolumetricSampler(Sampler):
         if ray_bundle.times is not None:
             ray_samples.times = ray_bundle.times[ray_indices]
 
-        # import pdb; pdb.set_trace()
+        if ray_bundle.metadata is not None:
+            ray_samples.metadata = {}
+            for k, v in ray_bundle.metadata.items():
+                if isinstance(v, torch.Tensor):
+                    ray_samples.metadata[k] = v[ray_indices]
 
         return ray_samples, ray_indices
 
