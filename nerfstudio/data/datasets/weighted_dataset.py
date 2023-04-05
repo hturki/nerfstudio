@@ -18,11 +18,12 @@ Weighted dataset.
 
 from typing import Dict
 
+import numpy as np
 import torch
+from PIL import Image
 
-from nerfstudio.data.dataparsers.base_dataparser import DataparserOutputs, Semantics
+from nerfstudio.data.dataparsers.base_dataparser import DataparserOutputs
 from nerfstudio.data.datasets.base_dataset import InputDataset
-from nerfstudio.data.utils.data_utils import get_semantics_and_mask_tensors_from_path
 
 
 class WeightedDataset(InputDataset):
@@ -36,6 +37,14 @@ class WeightedDataset(InputDataset):
         super().__init__(dataparser_outputs, scale_factor)
         assert "weights" in dataparser_outputs.metadata.keys() and isinstance(self.metadata["weights"], list)
         self.weights = self.metadata["weights"]
+        self.depth_images = self.metadata.get("depth_image", None)
 
     def get_metadata(self, data: Dict) -> Dict:
-        return {"weights": self.weights[data["image_idx"]] * torch.ones(*data["image"].shape[:2])}
+        metadata = {"weights": self.weights[data["image_idx"]] * torch.ones(*data["image"].shape[:2])}
+
+        if self.depth_images is not None:
+            filepath = self.depth_images[data["image_idx"]]
+            depth_image = torch.FloatTensor(np.load(filepath)).unsqueeze(-1) / self.metadata["pose_scale_factor"]
+            metadata["depth_image"] = depth_image
+
+        return metadata

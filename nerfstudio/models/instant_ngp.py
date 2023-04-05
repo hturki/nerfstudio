@@ -29,7 +29,6 @@ import torch.nn.functional as F
 from nerfacc import ContractionType
 from torch.nn import Parameter, SmoothL1Loss
 from torchmetrics import PeakSignalNoiseRatio
-from torchmetrics.functional import structural_similarity_index_measure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from typing_extensions import Literal
 
@@ -51,6 +50,7 @@ from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.models.mip_instant_ngp import ssim
 from nerfstudio.utils import colormaps, colors
 from nerfstudio.utils.colors import get_color
+
 
 @dataclass
 class InstantNGPModelConfig(ModelConfig):
@@ -88,6 +88,8 @@ class InstantNGPModelConfig(ModelConfig):
     """Whether to use an appearance embedding."""
     background_color: Literal["random", "black", "white"] = "random"
     """The color that is given to untrained areas."""
+
+    depth_lambda: float = 0
 
     train_with_random_bg: bool = False
 
@@ -232,6 +234,7 @@ class NGPModel(Model):
         outputs["accumulation"]  = accumulation
         outputs["alive_ray_mask"]  = accumulation.squeeze(-1) > 0
         outputs["num_samples_per_ray"]  = packed_info[:, 1]
+        outputs["directions_norm"] = ray_bundle.metadata["directions_norm"]
 
         return outputs
 
@@ -258,6 +261,14 @@ class NGPModel(Model):
             rgb_loss *= weights[mask]
 
         loss_dict = {"rgb_loss": rgb_loss.mean()}
+
+        if "depth_image" in batch and self.config.depth_lambda > 0:
+            euclidian_depth = batch["depth_image"] * outputs["directions_norm"]
+            depth_loss = F.mse_loss(outputs["depth"][mask], euclidian_depth[mask], reduction="none")
+            if "weights" in batch:
+                depth_loss *= weights[mask]
+            loss_dict["depth"] = self.config.depth_lambda * depth_loss.mean()
+
         return loss_dict
 
     def get_image_metrics_and_images(
@@ -275,7 +286,15 @@ class NGPModel(Model):
 
         combined_rgb = torch.cat([image, rgb], dim=1)
         combined_acc = torch.cat([acc], dim=1)
-        combined_depth = torch.cat([depth], dim=1)
+
+        depth_vis = []
+        if "depth_image" in batch:
+            depth_vis.append(colormaps.apply_depth_colormap(
+                batch["depth_image"] * outputs["directions_norm"],
+            ))
+
+        depth_vis.append(depth)
+        combined_depth = torch.cat(depth_vis, dim=1)
         combined_alive_ray_mask = torch.cat([alive_ray_mask], dim=1)
 
         images_dict = {

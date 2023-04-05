@@ -183,6 +183,8 @@ class MipInstantNGPModelConfig(ModelConfig):
     use_average_appearance_embedding: bool = True
     """Whether to use average appearance embedding or zeros for inference."""
 
+    depth_lambda: float = 0
+    force_weight_1: bool = False
 
 class MipNGPModel(Model):
     """Instant NGP model
@@ -318,13 +320,13 @@ class MipNGPModel(Model):
         with torch.inference_mode(not self.training):
             outputs = self.get_outputs_inner(ray_bundle)
             # Last condition is just to only visualize multiple levels on blender for now
-            if not self.training and (not ray_bundle.metadata.get('ignore_levels', False)) \
-                    and self.config.contraction_type == ContractionType.AABB:
-                num_levels = len(self.field.areas)
-                for i in range(num_levels):
-                    level_outputs = self.get_outputs_inner(ray_bundle, i)
-                    outputs[f"rgb_level_{i}"] = level_outputs["rgb"]
-                    outputs[f"depth_level_{i}"] = level_outputs["depth"]
+            # if not self.training and (not ray_bundle.metadata.get('ignore_levels', False)) \
+            #         and self.config.contraction_type == ContractionType.AABB:
+            #     num_levels = len(self.field.areas)
+            #     # for i in range(num_levels):
+            #     #     level_outputs = self.get_outputs_inner(ray_bundle, i)
+            #     #     outputs[f"rgb_level_{i}"] = level_outputs["rgb"]
+            #     #     outputs[f"depth_level_{i}"] = level_outputs["depth"]
 
             return outputs
 
@@ -351,11 +353,18 @@ class MipNGPModel(Model):
 
         # accumulation
         packed_info = nerfacc.pack_info(ray_indices, num_rays)
+
+        ends = ray_samples.frustums.ends
+        if self.config.force_weight_1:
+            ends = ends.clone()
+            ends[packed_info[..., 0].long() - 1] = 1e10
+            ends[-1] = 1e10
+
         weights = nerfacc.render_weight_from_density(
             packed_info=packed_info,
             sigmas=field_outputs[FieldHeadNames.DENSITY],
             t_starts=ray_samples.frustums.starts,
-            t_ends=ray_samples.frustums.ends,
+            t_ends=ends,
         )
 
         outputs = {}
@@ -396,6 +405,7 @@ class MipNGPModel(Model):
             outputs["accumulation"] = accumulation
             outputs["alive_ray_mask"] = alive_ray_mask  # the rays we kept from sampler
             outputs["num_samples_per_ray"] = packed_info[:, 1]
+            outputs["directions_norm"] = ray_bundle.metadata["directions_norm"]
 
         return outputs
 
@@ -432,6 +442,14 @@ class MipNGPModel(Model):
             rgb_loss *= weights[mask]
 
         loss_dict = {"rgb_loss": rgb_loss.mean()}
+
+        if "depth_image" in batch and self.config.depth_lambda > 0:
+            euclidian_depth = batch["depth_image"] * outputs["directions_norm"]
+            depth_loss = F.mse_loss(outputs["depth"][mask], euclidian_depth[mask], reduction="none")
+            if "weights" in batch:
+                depth_loss *= weights[mask]
+            loss_dict["depth"] = self.config.depth_lambda * depth_loss.mean()
+
         return loss_dict
 
     def get_image_metrics_and_images(
@@ -449,7 +467,16 @@ class MipNGPModel(Model):
 
         combined_rgb = torch.cat([image, rgb], dim=1)
         combined_acc = torch.cat([acc], dim=1)
-        combined_depth = torch.cat([depth], dim=1)
+
+        depth_vis = []
+        if "depth_image" in batch:
+            depth_vis.append(colormaps.apply_depth_colormap(
+                batch["depth_image"] * outputs["directions_norm"],
+            ))
+
+        depth_vis.append(depth)
+        combined_depth = torch.cat(depth_vis, dim=1)
+
         combined_alive_ray_mask = torch.cat([alive_ray_mask], dim=1)
 
         images_dict = {

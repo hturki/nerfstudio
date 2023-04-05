@@ -73,6 +73,7 @@ class Multicam(DataParser):
         cx = []
         cy = []
         weights = []
+        depth_images = []
 
         for i in range(len(meta["file_path"])):
             image_filenames.append(self.data / meta["file_path"][i])
@@ -83,6 +84,8 @@ class Multicam(DataParser):
             cx.append(meta["width"][i] / 2.0)
             cy.append(meta["height"][i] / 2.0)
             weights.append(meta["lossmult"][i])
+            if "depth_path" in meta:
+                depth_images.append(self.data / meta["depth_path"][i])
 
         poses = np.array(poses).astype(np.float32)
         camera_to_world = torch.from_numpy(poses[:, :3])
@@ -108,13 +111,18 @@ class Multicam(DataParser):
             camera_type=CameraType.PERSPECTIVE,
         )
 
+        metadata = {"weights": weights}
+        if len(depth_images) > 0:
+            metadata["depth_image"] = depth_images
+            metadata["pose_scale_factor"] = base_meta["pose_scale_factor"]
+
         dataparser_outputs = DataparserOutputs(
             image_filenames=image_filenames,
             cameras=cameras,
             alpha_color=alpha_color_tensor,
             scene_box=scene_box,
             dataparser_scale=self.scale_factor,
-            metadata={"weights": weights}
+            metadata=metadata
         )
 
         return dataparser_outputs
