@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Optional, Tuple, Type, Any
 
 import nerfacc
 import numpy as np
@@ -166,7 +166,7 @@ class MipInstantNGPModelConfig(ModelConfig):
     max_resolution: int = 65536
     """Maximum resolution of the hashmap for the base mlp."""
 
-    interpolation_model: Literal["mlp_rgb", "mlp_density", "feature"] = "mlp_rgb"
+    interpolation_model: Literal["mlp_rgb", "mlp_density", "feature", "ipe", "anneal"] = "ipe"
     use_frustum_area: bool = False
     same_color_mlp: bool = True
     level_window: Optional[int] = None
@@ -185,6 +185,7 @@ class MipInstantNGPModelConfig(ModelConfig):
 
     depth_lambda: float = 0
     force_weight_1: bool = False
+    finest_occ_grid: bool = True
 
 class MipNGPModel(Model):
     """Instant NGP model
@@ -196,7 +197,9 @@ class MipNGPModel(Model):
     config: MipInstantNGPModelConfig
     field: MipTCNNField
 
-    def __init__(self, config: MipInstantNGPModelConfig, **kwargs) -> None:
+    def __init__(self, config: MipInstantNGPModelConfig, metadata: Dict[str, Any], **kwargs) -> None:
+        self.cameras = metadata["cameras"]
+
         super().__init__(config=config, **kwargs)
 
         self.render_step_size = (
@@ -234,22 +237,21 @@ class MipNGPModel(Model):
             training_level_jitter=self.config.training_level_jitter,
             level_anneal=self.config.level_anneal,
             level_anneal_cosine=self.config.level_anneal_cosine,
+            cameras=self.cameras,
+            finest_occ_grid=self.config.finest_occ_grid,
         )
 
         # Occupancy Grid
         self.occupancy_grid = nerfacc.OccupancyGrid(
             roi_aabb=self.scene_aabb,
             resolution=self.config.grid_resolution,
-            # contraction_type=self.config.contraction_type,
+            contraction_type=self.config.contraction_type,
             levels=self.config.grid_levels
         )
 
-        if self.config.contraction_type != ContractionType.AABB:
-            self.occupancy_grid._contraction_type = self.config.contraction_type
-
         # Sampler
         self.sampler = VolumetricSampler(
-            scene_aabb=enlarge_aabb(self.scene_box.aabb, self.config.grid_levels),
+            scene_aabb=self.scene_box.aabb,
             occupancy_grid=self.occupancy_grid,
             density_fn=self.field.density_fn if self.config.use_sigma_fn else None,
         )
@@ -273,6 +275,8 @@ class MipNGPModel(Model):
         self.psnr = PeakSignalNoiseRatio(data_range=1.0)
         self.ssim = ssim
         self.lpips = LearnedPerceptualImagePatchSimilarity()
+
+        self.trained_levels = set()
 
     def get_training_callbacks(
             self, training_callback_attributes: TrainingCallbackAttributes
@@ -320,13 +324,14 @@ class MipNGPModel(Model):
         with torch.inference_mode(not self.training):
             outputs = self.get_outputs_inner(ray_bundle)
             # Last condition is just to only visualize multiple levels on blender for now
-            # if not self.training and (not ray_bundle.metadata.get('ignore_levels', False)) \
-            #         and self.config.contraction_type == ContractionType.AABB:
-            #     num_levels = len(self.field.areas)
-            #     # for i in range(num_levels):
-            #     #     level_outputs = self.get_outputs_inner(ray_bundle, i)
-            #     #     outputs[f"rgb_level_{i}"] = level_outputs["rgb"]
-            #     #     outputs[f"depth_level_{i}"] = level_outputs["depth"]
+            if not self.training and (not ray_bundle.metadata.get('ignore_levels', False)) \
+                    and self.config.contraction_type == ContractionType.AABB:
+                num_levels = len(self.field.areas)
+                for i in range(num_levels):
+                    if i in self.trained_levels:
+                        level_outputs = self.get_outputs_inner(ray_bundle, i)
+                        outputs[f"rgb_level_{i}"] = level_outputs["rgb"]
+                        outputs[f"depth_level_{i}"] = level_outputs["depth"]
 
             return outputs
 
@@ -424,6 +429,8 @@ class MipNGPModel(Model):
         if self.training:
             for key, val in outputs["level_counts"].items():
                 metrics_dict[f"level_counts_{key}"] = val
+                if val > 0:
+                    self.trained_levels.add(key)
 
             # if "weights" in batch:
             #     for weight in torch.unique(batch["weights"]):
@@ -537,9 +544,3 @@ class MipNGPModel(Model):
             image = image * alpha + bg * (1.0 - alpha)
 
         return image
-
-
-def enlarge_aabb(aabb: torch.Tensor, factor: float) -> torch.Tensor:
-    center = (aabb[0] + aabb[1]) / 2
-    extent = (aabb[1] - aabb[0]) / 2
-    return torch.cat([center - extent * factor, center + extent * factor])

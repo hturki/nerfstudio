@@ -133,6 +133,9 @@ class NerfactoModelConfig(ModelConfig):
     disable_scene_contraction: bool = False
     """Whether to disable scene contraction or not."""
 
+    features_per_level: int = 8
+    appearance_embedding_dim: int = 32
+    use_ipe: bool = False
 
 class NerfactoModel(Model):
     """Nerfacto model
@@ -166,6 +169,9 @@ class NerfactoModel(Model):
             use_pred_normals=self.config.predict_normals,
             use_train_appearance_embedding=self.config.use_train_appearance_embedding,
             use_average_appearance_embedding=self.config.use_average_appearance_embedding,
+            appearance_embedding_dim = self.config.appearance_embedding_dim,
+            use_ipe = self.config.use_ipe,
+            features_per_level=self.config.features_per_level,
         )
 
         self.density_fns = []
@@ -321,6 +327,7 @@ class NerfactoModel(Model):
         for i in range(self.config.num_proposal_iterations):
             outputs[f"prop_depth_{i}"] = self.renderer_depth(weights=weights_list[i], ray_samples=ray_samples_list[i])
 
+        outputs["directions_norm"] = ray_bundle.metadata["directions_norm"]
         return outputs
 
     def get_metrics_dict(self, outputs, batch):
@@ -367,14 +374,29 @@ class NerfactoModel(Model):
 
         combined_rgb = torch.cat([image, rgb], dim=1)
         combined_acc = torch.cat([acc], dim=1)
-        combined_depth = torch.cat([depth], dim=1)
+
+        depth_vis = []
+        if "depth_image" in batch:
+            depth_vis.append(colormaps.apply_depth_colormap(
+                batch["depth_image"] * outputs["directions_norm"],
+            ))
+
+        depth_vis.append(depth)
+        combined_depth = torch.cat(depth_vis, dim=1)
+
+        if "mask" in batch:
+            mask = batch["mask"]
+            assert torch.all(mask[:, mask.sum(dim=0) > 0])
+            image = image[:, mask.sum(dim=0).squeeze() > 0]
+            rgb = rgb[:, mask.sum(dim=0).squeeze() > 0]
+
+        ssim = self.ssim(image, rgb)
 
         # Switch images from [H, W, C] to [1, C, H, W] for metrics computations
         image = torch.moveaxis(image, -1, 0)[None, ...]
         rgb = torch.moveaxis(rgb, -1, 0)[None, ...]
 
         psnr = self.psnr(image, rgb)
-        ssim = self.ssim(image, rgb)
         lpips = self.lpips(image, rgb)
 
         # all of these metrics will be logged as scalars

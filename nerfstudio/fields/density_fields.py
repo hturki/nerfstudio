@@ -57,7 +57,7 @@ class HashMLPDensityField(Field):
             max_res: int = 1024,
             base_res: int = 16,
             log2_hashmap_size: int = 18,
-            features_per_level: int = 8,
+            features_per_level: int = 2,
     ) -> None:
         super().__init__()
         self.register_buffer("aabb", aabb)

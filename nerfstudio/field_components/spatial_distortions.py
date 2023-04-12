@@ -81,7 +81,7 @@ class SceneContraction(SpatialDistortion):
             mag = positions.mean.norm(dim=-1)
             mask = mag >= 1
             cov = positions.cov.clone()
-            cov[mask] = jc_means[mask] @ positions.cov[mask] @ torch.transpose(jc_means[mask], -2, -1)
+            cov[mask] = (jc_means[mask] @ positions.cov[mask] @ torch.transpose(jc_means[mask], -2, -1)).to(cov)
 
             return Gaussians(mean=means, cov=cov)
 

@@ -394,7 +394,7 @@ class VolumetricSampler(Sampler):
         if self.scene_aabb is not None:
             self.scene_aabb = self.scene_aabb.to("cuda").flatten()
 
-    def get_sigma_fn(self, origins, directions) -> Optional[Callable]:
+    def get_sigma_fn(self, origins, directions, pixel_area) -> Optional[Callable]:
         """Returns a function that returns the density of a point.
 
         Args:
@@ -413,7 +413,8 @@ class VolumetricSampler(Sampler):
             t_origins = origins[ray_indices]
             t_dirs = directions[ray_indices]
             positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
-            de = density_fn(positions, None)
+            de = density_fn(positions, None, origins=t_origins, directions=t_dirs, starts=t_starts, ends=t_ends,
+                            pixel_area=pixel_area[ray_indices])
             return de
 
         return sigma_fn
@@ -471,7 +472,7 @@ class VolumetricSampler(Sampler):
             t_max=t_max,
             scene_aabb=self.scene_aabb,
             grid=self.occupancy_grid,
-            sigma_fn=self.get_sigma_fn(rays_o, rays_d),
+            sigma_fn=self.get_sigma_fn(rays_o, rays_d, ray_bundle.pixel_area.contiguous()),
             render_step_size=render_step_size,
             near_plane=near_plane,
             far_plane=far_plane,

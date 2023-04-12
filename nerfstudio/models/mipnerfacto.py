@@ -19,10 +19,11 @@ NeRF implementation that combines many recent advancements.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Type, Optional
+from typing import Dict, List, Tuple, Type, Optional, Any
 
 import numpy as np
 import torch
+from nerfstudio.utils.colors import get_color
 from torch.nn import Parameter
 from torchmetrics import PeakSignalNoiseRatio
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
@@ -52,7 +53,7 @@ from nerfstudio.model_components.renderers import (
     DepthRenderer,
     RGBRenderer, SemanticRenderer,
 )
-from nerfstudio.model_components.scene_colliders import NearFarCollider
+from nerfstudio.model_components.scene_colliders import NearFarCollider, AABBBoxCollider
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.models.mip_instant_ngp import ssim
 from nerfstudio.utils import colormaps
@@ -83,7 +84,7 @@ class MipNerfactoModelConfig(ModelConfig):
     """Size of the hashmap for the base mlp"""
     num_proposal_samples_per_ray: Tuple[int, ...] = (256, 512)
     """Number of samples per ray for each proposal network."""
-    num_nerf_samples_per_ray: int = 192
+    num_nerf_samples_per_ray: int = 48
     """Number of samples per ray for the nerf network."""
     proposal_update_every: int = 5
     """Sample every n steps after the warmup"""
@@ -118,27 +119,40 @@ class MipNerfactoModelConfig(ModelConfig):
     disable_scene_contraction: bool = False
     """Whether to disable scene contraction or not."""
 
-    interpolation_model: Literal["mlp_rgb", "mlp_density", "feature"] = "mlp_rgb"
+    interpolation_model: Literal["mlp_rgb", "mlp_density", "feature", "ipe", "anneal"] = "ipe"
     use_frustum_area: bool = False
-    same_color_mlp: bool = False
+    same_color_mlp: bool = True
     level_window: Optional[int] = None
     training_level_jitter: float = 0
 
     appearance_embedding_dim: int = 32
-    features_per_level: int = 4
+    features_per_level: int = 8
+
+    train_with_random_bg: bool = False
 
 
 class MipNerfactoModel(Model):
     config: MipNerfactoModelConfig
 
+    def __init__(self, config: MipNerfactoModelConfig, metadata: Dict[str, Any], **kwargs) -> None:
+        self.near = metadata.get("near", None)
+        self.far = metadata.get("far", None)
+        super().__init__(config=config, **kwargs)
+
     def populate_modules(self):
         """Set the fields and modules."""
         super().populate_modules()
 
+        near = self.near if self.near is not None else self.config.near_plane
+        far = self.far if self.far is not None else self.config.far_plane
+
         if self.config.disable_scene_contraction:
             scene_contraction = None
+            self.collider = AABBBoxCollider(self.scene_box, near_plane=near)
         else:
             scene_contraction = SceneContraction(order=float("inf"))
+            # Collider
+            self.collider = NearFarCollider(near_plane=near, far_plane=far)
 
         # Fields
         self.field = MipTCNNField(
@@ -216,9 +230,6 @@ class MipNerfactoModel(Model):
             initial_sampler=initial_sampler,
         )
 
-        # Collider
-        self.collider = NearFarCollider(near_plane=self.config.near_plane, far_plane=self.config.far_plane)
-
         # renderers
         self.renderer_rgb = RGBRenderer(background_color=self.config.background_color)
         self.renderer_accumulation = AccumulationRenderer()
@@ -288,6 +299,7 @@ class MipNerfactoModel(Model):
         #         outputs[f"rgb_level_{i}"] = level_outputs["rgb"]
         #         outputs[f"depth_level_{i}"] = level_outputs["depth"]
 
+        outputs["directions_norm"] = ray_bundle.metadata["directions_norm"]
         return outputs
 
     def get_outputs_inner(self, ray_bundle: RayBundle, explicit_level: Optional[int] = None):
@@ -303,14 +315,17 @@ class MipNerfactoModel(Model):
         weights_list.append(weights)
         ray_samples_list.append(ray_samples)
 
-        rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
-        depth = self.renderer_depth(weights=weights, ray_samples=ray_samples)
+        outputs = {}
 
-        outputs = {
-            "rgb": rgb,
-            # "accumulation": accumulation,
-            "depth": depth,
-        }
+        if self.training and self.config.train_with_random_bg:
+            background = torch.rand_like(ray_bundle.origins)
+            outputs["bg_color"] = background
+        else:
+            background = None
+
+        outputs["rgb"] = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights,
+                                           background=background)
+        outputs["depth"] = self.renderer_depth(weights=weights, ray_samples=ray_samples)
 
         if explicit_level is None:
             outputs["accumulation"] = self.renderer_accumulation(weights=weights)
@@ -330,7 +345,7 @@ class MipNerfactoModel(Model):
 
     def get_metrics_dict(self, outputs, batch):
         metrics_dict = {}
-        image = batch["image"].to(self.device)
+        image = self._get_image(batch, outputs)
         metrics_dict["psnr"] = self.psnr(outputs["rgb"], image)
         if self.training:
             metrics_dict["distortion"] = distortion_loss(outputs["weights_list"], outputs["ray_samples_list"])
@@ -342,7 +357,7 @@ class MipNerfactoModel(Model):
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
-        image = batch["image"].to(self.device)
+        image = self._get_image(batch, outputs)
         rgb_loss = self.rgb_loss(image, outputs["rgb"])
         if "weights" in batch:
             weights = batch["weights"].to(self.device).unsqueeze(-1)
@@ -358,7 +373,7 @@ class MipNerfactoModel(Model):
     def get_image_metrics_and_images(
             self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
     ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
-        image = batch["image"].to(self.device)
+        image = self._get_image(batch, outputs)
         rgb = outputs["rgb"]
         acc = colormaps.apply_colormap(outputs["accumulation"])
         depth = colormaps.apply_depth_colormap(
@@ -412,3 +427,13 @@ class MipNerfactoModel(Model):
             images_dict[key] = prop_depth_i
 
         return metrics_dict, images_dict
+
+    def _get_image(self, batch: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        image = batch["image"].to(self.device)
+
+        if self.config.train_with_random_bg:
+            alpha = batch["alpha"].to(self.device)
+            bg = outputs["bg_color"] if self.training else get_color(self.config.background_color).to(self.device)
+            image = image * alpha + bg * (1.0 - alpha)
+
+        return image

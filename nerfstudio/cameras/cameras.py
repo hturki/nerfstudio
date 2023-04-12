@@ -91,6 +91,7 @@ class Cameras(TensorDataclass):
     distortion_params: Optional[TensorType["num_cameras":..., 6]]
     camera_type: TensorType["num_cameras":..., 1]
     times: Optional[TensorType["num_cameras", 1]]
+    skew: Optional[TensorType["num_cameras", 1]]
 
     def __init__(
         self,
@@ -111,6 +112,7 @@ class Cameras(TensorDataclass):
             ]
         ] = CameraType.PERSPECTIVE,
         times: Optional[TensorType["num_cameras"]] = None,
+        skew: Optional[TensorType["num_cameras"]] = None,
     ) -> None:
         """Initializes the Cameras object.
 
@@ -145,6 +147,7 @@ class Cameras(TensorDataclass):
         self.width = self._init_get_height_width(width, self.cx)
         self.camera_type = self._init_get_camera_type(camera_type)
         self.times = self._init_get_times(times)
+        self.skew = skew
 
         self.__post_init__()  # This will do the dataclass post_init and broadcast all the tensors
 
@@ -604,9 +607,17 @@ class Cameras(TensorDataclass):
 
         # Get our image coordinates and image coordinates offset by 1 (offsets used for dx, dy calculations)
         # Also make sure the shapes are correct
-        coord = torch.stack([(x - cx) / fx, -(y - cy) / fy], -1)  # (num_rays, 2)
-        coord_x_offset = torch.stack([(x - cx + 1) / fx, -(y - cy) / fy], -1)  # (num_rays, 2)
-        coord_y_offset = torch.stack([(x - cx) / fx, -(y - cy + 1) / fy], -1)  # (num_rays, 2)
+        if self.skew is None:
+            x_coord = (x - cx) / fx
+            x_offset_coord = (x - cx + 1) / fx
+        else:
+            skew = self.skew[true_indices].squeeze(-1)
+            x_coord = x / fx + (-y * skew + cy * skew - cx * fy)/ (fx * fy)
+            x_offset_coord = (x + 1) / fx + (-y * skew + cy * skew - cx * fy)/ (fx * fy)
+
+        coord = torch.stack([x_coord, -(y - cy) / fy], -1)  # (num_rays, 2)
+        coord_x_offset = torch.stack([x_offset_coord, -(y - cy) / fy], -1)  # (num_rays, 2)
+        coord_y_offset = torch.stack([x_coord, -(y - cy + 1) / fy], -1)  # (num_rays, 2)
         assert (
             coord.shape == num_rays_shape + (2,)
             and coord_x_offset.shape == num_rays_shape + (2,)

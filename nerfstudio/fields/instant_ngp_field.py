@@ -73,6 +73,7 @@ class TCNNInstantNGPField(Field):
         num_levels: int = 16,
         log2_hashmap_size: int = 19,
         max_res: int = 2048,
+        features_per_level: int = 8
     ) -> None:
         super().__init__()
 
@@ -104,7 +105,7 @@ class TCNNInstantNGPField(Field):
             encoding_config={
                 "otype": "HashGrid",
                 "n_levels": num_levels,
-                "n_features_per_level": 8,
+                "n_features_per_level": features_per_level,
                 "log2_hashmap_size": log2_hashmap_size,
                 "base_resolution": base_res,
                 "per_level_scale": per_level_scale,

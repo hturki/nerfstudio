@@ -90,6 +90,8 @@ class InstantNGPModelConfig(ModelConfig):
     """The color that is given to untrained areas."""
 
     depth_lambda: float = 0
+    num_levels: int = 16
+    features_per_level: int = 8
 
     train_with_random_bg: bool = False
 
@@ -126,6 +128,8 @@ class NGPModel(Model):
             num_images=self.num_train_data,
             log2_hashmap_size=self.config.log2_hashmap_size,
             max_res=self.config.max_res,
+            num_levels=self.config.num_levels,
+            features_per_level=self.config.features_per_level
         )
 
         self.scene_aabb = Parameter(self.scene_box.aabb.flatten(), requires_grad=False)

@@ -111,7 +111,7 @@ class Multicam(DataParser):
             camera_type=CameraType.PERSPECTIVE,
         )
 
-        metadata = {"weights": weights}
+        metadata = {"weights": weights, "cameras": cameras, "near": meta["near"][0], "far": meta["far"][0]}
         if len(depth_images) > 0:
             metadata["depth_image"] = depth_images
             metadata["pose_scale_factor"] = base_meta["pose_scale_factor"]

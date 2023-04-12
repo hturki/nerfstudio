@@ -94,6 +94,7 @@ class Adop(DataParser):
         fy = []
         cx = []
         cy = []
+        skew = []
 
         for image_path, c2w, K in zip(image_paths, poses, intrinsics):
             image_filenames.append(self.data / 'undistorted_images' / image_path.strip())
@@ -115,6 +116,9 @@ class Adop(DataParser):
             fy.append(K_line[6])
             cx.append(K_line[4])
             cy.append(K_line[7])
+
+            if K_line[3] > 0:
+                skew.append(K_line[3])
 
         c2ws = torch.cat(c2ws)
 
@@ -152,6 +156,7 @@ class Adop(DataParser):
             cameras_fy = []
             cameras_cx = []
             cameras_cy = []
+            cameras_skew = []
             train_indices = []
             weights = []
             if self.config.train_with_val_images:
@@ -167,6 +172,8 @@ class Adop(DataParser):
                         cameras_fy.append(fy[i] / j)
                         cameras_cx.append(cx[i] / j)
                         cameras_cy.append(cy[i] / j)
+                        if len(skew) > 0:
+                            cameras_skew.append(skew[i])
                         weights.append(j ** 2)
 
                         if i in train_indices:
@@ -185,6 +192,7 @@ class Adop(DataParser):
                 cy=torch.FloatTensor(cameras_cy),
                 width=torch.LongTensor(cameras_width),
                 height=torch.LongTensor(cameras_height),
+                skew=torch.FloatTensor(cameras_skew).unsqueeze(-1) if len(cameras_skew) > 0 else None,
                 camera_type=CameraType.PERSPECTIVE,
             )
         else:
@@ -206,12 +214,13 @@ class Adop(DataParser):
                 cy=torch.FloatTensor(cy)[indices],
                 width=torch.IntTensor(width)[indices],
                 height=torch.IntTensor(height)[indices],
+                skew=torch.FloatTensor(skew)[indices].unsqueeze(-1) if len(skew) > 0 else None,
                 camera_type=CameraType.PERSPECTIVE,
             )
 
         print('Num images in split {}: {}'.format(split, len(indices)))
 
-        metadata = {TRAIN_INDICES: indices}
+        metadata = {TRAIN_INDICES: indices, "cameras": cameras}
         if weights is not None:
             metadata[WEIGHTS] = weights
 

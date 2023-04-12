@@ -46,8 +46,10 @@ class Field(nn.Module):
         self._density_before_activation = None
 
     def density_fn(
-        self, positions: TensorType["bs":..., 3], times: Optional[TensorType["bs":..., 1]]
-    ) -> TensorType["bs":..., 1]:
+            self, positions: TensorType["bs":..., 3], times: TensorType["bs":..., 1],
+            step_size: int = None, origins: Optional[torch.Tensor] = None,
+            directions: Optional[torch.Tensor] = None, starts: Optional[torch.Tensor] = None,
+            ends: Optional[torch.Tensor] = None, pixel_area: Optional[torch.Tensor] = None) -> TensorType["bs":..., 1]:
         """Returns only the density. Used primarily with the density grid.
 
         Args:

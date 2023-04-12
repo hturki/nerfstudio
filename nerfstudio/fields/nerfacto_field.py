@@ -16,11 +16,13 @@
 Field for compound nerf model, adds scene contraction and image embeddings to instant ngp
 """
 
-
 from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
+
+from nerfstudio.fields.mip_tcnn_field import P
+from nerfstudio.utils.math import expected_sin
 from torch import nn
 from torch.nn.parameter import Parameter
 from torchtyping import TensorType
@@ -30,7 +32,7 @@ from nerfstudio.data.dataparsers.adop_dataparser import TRAIN_INDICES
 from nerfstudio.data.scene_box import SceneBox
 from nerfstudio.field_components.activations import trunc_exp
 from nerfstudio.field_components.embedding import Embedding
-from nerfstudio.field_components.encodings import Encoding, HashEncoding, SHEncoding
+from nerfstudio.field_components.encodings import Encoding, HashEncoding, SHEncoding, NeRFEncoding
 from nerfstudio.field_components.field_heads import (
     DensityFieldHead,
     FieldHead,
@@ -83,29 +85,31 @@ class TCNNNerfactoField(Field):
     """
 
     def __init__(
-        self,
-        aabb: TensorType,
-        num_images: int,
-        num_layers: int = 2,
-        hidden_dim: int = 64,
-        geo_feat_dim: int = 15,
-        num_levels: int = 16,
-        max_res: int = 2048,
-        log2_hashmap_size: int = 19,
-        num_layers_color: int = 3,
-        num_layers_transient: int = 2,
-        hidden_dim_color: int = 64,
-        hidden_dim_transient: int = 64,
-        appearance_embedding_dim: int = 32,
-        transient_embedding_dim: int = 16,
-        use_transient_embedding: bool = False,
-        use_semantics: bool = False,
-        num_semantic_classes: int = 100,
-        pass_semantic_gradients: bool = False,
-        use_pred_normals: bool = False,
-        use_train_appearance_embedding: bool = True,
-        use_average_appearance_embedding: bool = False,
-        spatial_distortion: SpatialDistortion = None,
+            self,
+            aabb: TensorType,
+            num_images: int,
+            num_layers: int = 2,
+            hidden_dim: int = 64,
+            geo_feat_dim: int = 15,
+            num_levels: int = 16,
+            max_res: int = 2048,
+            log2_hashmap_size: int = 19,
+            num_layers_color: int = 3,
+            num_layers_transient: int = 2,
+            hidden_dim_color: int = 64,
+            hidden_dim_transient: int = 64,
+            appearance_embedding_dim: int = 32,
+            transient_embedding_dim: int = 16,
+            use_transient_embedding: bool = False,
+            use_semantics: bool = False,
+            num_semantic_classes: int = 100,
+            pass_semantic_gradients: bool = False,
+            use_pred_normals: bool = False,
+            use_train_appearance_embedding: bool = True,
+            use_average_appearance_embedding: bool = False,
+            spatial_distortion: SpatialDistortion = None,
+            features_per_level: int = 2,
+            use_ipe: bool = False
     ) -> None:
         super().__init__()
 
@@ -119,7 +123,8 @@ class TCNNNerfactoField(Field):
         self.spatial_distortion = spatial_distortion
         self.num_images = num_images
         self.appearance_embedding_dim = appearance_embedding_dim
-        self.embedding_appearance = Embedding(self.num_images, self.appearance_embedding_dim)
+        if appearance_embedding_dim > 0:
+            self.embedding_appearance = Embedding(self.num_images, self.appearance_embedding_dim)
         self.use_train_appearance_embedding = use_train_appearance_embedding
         self.use_average_appearance_embedding = use_average_appearance_embedding
         self.use_transient_embedding = use_transient_embedding
@@ -128,7 +133,6 @@ class TCNNNerfactoField(Field):
         self.pass_semantic_gradients = pass_semantic_gradients
 
         base_res: int = 16
-        features_per_level: int = 2
         growth_factor = np.exp((np.log(max_res) - np.log(base_res)) / (num_levels - 1))
 
         self.direction_encoding = tcnn.Encoding(
@@ -144,9 +148,20 @@ class TCNNNerfactoField(Field):
             encoding_config={"otype": "Frequency", "n_frequencies": 2},
         )
 
-        self.mlp_base = tcnn.NetworkWithInputEncoding(
+        self.use_ipe = use_ipe
+        if use_ipe:
+            if self.spatial_distortion is not None:
+                self.register_buffer("P", P, persistent=False)
+                ipe_out_dim = 2 * P.shape[1]
+            else:
+                self.pos_enc = NeRFEncoding(in_dim=3, num_frequencies=16, min_freq_exp=0.0, max_freq_exp=16.0,
+                                            include_input=True)
+                ipe_out_dim = self.pos_enc.num_frequencies * 3 * 2 + 3
+        else:
+            ipe_out_dim = 0
+
+        self.encoding = tcnn.Encoding(
             n_input_dims=3,
-            n_output_dims=1 + self.geo_feat_dim,
             encoding_config={
                 "otype": "HashGrid",
                 "n_levels": num_levels,
@@ -154,7 +169,12 @@ class TCNNNerfactoField(Field):
                 "log2_hashmap_size": log2_hashmap_size,
                 "base_resolution": base_res,
                 "per_level_scale": growth_factor,
-            },
+            }
+        )
+
+        self.mlp_base = tcnn.Network(
+            n_input_dims=features_per_level * num_levels + ipe_out_dim,
+            n_output_dims=1 + self.geo_feat_dim,
             network_config={
                 "otype": "FullyFusedMLP",
                 "activation": "ReLU",
@@ -242,7 +262,23 @@ class TCNNNerfactoField(Field):
         if not self._sample_locations.requires_grad:
             self._sample_locations.requires_grad = True
         positions_flat = positions.view(-1, 3)
-        h = self.mlp_base(positions_flat).view(*ray_samples.frustums.shape, -1)
+
+        mlp_input = self.encoding(positions_flat)
+        if self.use_ipe:
+            gaussian_samples = ray_samples.frustums.get_gaussian_blob()
+            if self.spatial_distortion is not None:
+                gaussian_samples = self.spatial_distortion(gaussian_samples)
+                lifted_mean = torch.matmul(gaussian_samples.mean, self.P)
+                lifted_diag = torch.sum(self.P * torch.matmul(gaussian_samples.cov, self.P), dim=-2)
+                encoded_xyz = expected_sin(
+                    torch.cat([lifted_mean, lifted_mean + torch.pi / 2.0], dim=-1),
+                    torch.cat(2 * [lifted_diag], dim=-1)
+                )
+            else:
+                encoded_xyz = self.pos_enc(gaussian_samples.mean, covs=gaussian_samples.cov)
+            mlp_input = torch.cat([mlp_input, encoded_xyz.view(-1, encoded_xyz.shape[-1])], -1)
+
+        h = self.mlp_base(mlp_input).view(*ray_samples.frustums.shape, -1)
         density_before_activation, base_mlp_out = torch.split(h, [1, self.geo_feat_dim], dim=-1)
         self._density_before_activation = density_before_activation
 
@@ -254,7 +290,7 @@ class TCNNNerfactoField(Field):
         return density, base_mlp_out
 
     def get_outputs(
-        self, ray_samples: RaySamples, density_embedding: Optional[TensorType] = None
+            self, ray_samples: RaySamples, density_embedding: Optional[TensorType] = None
     ) -> Dict[FieldHeadNames, TensorType]:
         assert density_embedding is not None
         outputs = {}
@@ -267,19 +303,20 @@ class TCNNNerfactoField(Field):
 
         outputs_shape = ray_samples.frustums.directions.shape[:-1]
 
-        # appearance
-        if ray_samples.metadata is not None and TRAIN_INDICES in ray_samples.metadata:
-            embedded_appearance = self.embedding_appearance(ray_samples.metadata[TRAIN_INDICES].squeeze())
-        elif self.training:
-            embedded_appearance = self.embedding_appearance(ray_samples.camera_indices.squeeze())
-        elif self.use_average_appearance_embedding:
-            embedded_appearance = torch.ones(
-                (*directions.shape[:-1], self.appearance_embedding_dim), device=directions.device
-            ) * self.embedding_appearance.mean(dim=0)
-        else:
-            embedded_appearance = torch.zeros(
-                (*directions.shape[:-1], self.appearance_embedding_dim), device=directions.device
-            )
+        if self.appearance_embedding_dim > 0:
+            # appearance
+            if ray_samples.metadata is not None and TRAIN_INDICES in ray_samples.metadata:
+                embedded_appearance = self.embedding_appearance(ray_samples.metadata[TRAIN_INDICES].squeeze())
+            elif self.training:
+                embedded_appearance = self.embedding_appearance(ray_samples.camera_indices.squeeze())
+            elif self.use_average_appearance_embedding:
+                embedded_appearance = torch.ones(
+                    (*directions.shape[:-1], self.appearance_embedding_dim), device=directions.device
+                ) * self.embedding_appearance.mean(dim=0)
+            else:
+                embedded_appearance = torch.zeros(
+                    (*directions.shape[:-1], self.appearance_embedding_dim), device=directions.device
+                )
 
         # transients
         if self.use_transient_embedding and self.training:
@@ -315,14 +352,24 @@ class TCNNNerfactoField(Field):
             x = self.mlp_pred_normals(pred_normals_inp).view(*outputs_shape, -1).to(directions)
             outputs[FieldHeadNames.PRED_NORMALS] = self.field_head_pred_normals(x)
 
-        h = torch.cat(
-            [
-                d,
-                density_embedding.view(-1, self.geo_feat_dim),
-                embedded_appearance.view(-1, self.appearance_embedding_dim),
-            ],
-            dim=-1,
-        )
+        if self.appearance_embedding_dim > 0:
+            h = torch.cat(
+                [
+                    d,
+                    density_embedding.view(-1, self.geo_feat_dim),
+                    embedded_appearance.view(-1, self.appearance_embedding_dim),
+                ],
+                dim=-1,
+            )
+        else:
+            h = torch.cat(
+                [
+                    d,
+                    density_embedding.view(-1, self.geo_feat_dim),
+                ],
+                dim=-1,
+            )
+
         rgb = self.mlp_head(h).view(*outputs_shape, -1).to(directions)
         outputs.update({FieldHeadNames.RGB: rgb})
 
@@ -335,19 +382,19 @@ class TorchNerfactoField(Field):
     """
 
     def __init__(
-        self,
-        aabb: TensorType,
-        num_images: int,
-        position_encoding: Encoding = HashEncoding(),
-        direction_encoding: Encoding = SHEncoding(),
-        base_mlp_num_layers: int = 3,
-        base_mlp_layer_width: int = 64,
-        head_mlp_num_layers: int = 2,
-        head_mlp_layer_width: int = 32,
-        appearance_embedding_dim: int = 40,
-        skip_connections: Tuple = (4,),
-        field_heads: Tuple[FieldHead] = (RGBFieldHead(),),
-        spatial_distortion: SpatialDistortion = SceneContraction(),
+            self,
+            aabb: TensorType,
+            num_images: int,
+            position_encoding: Encoding = HashEncoding(),
+            direction_encoding: Encoding = SHEncoding(),
+            base_mlp_num_layers: int = 3,
+            base_mlp_layer_width: int = 64,
+            head_mlp_num_layers: int = 2,
+            head_mlp_layer_width: int = 32,
+            appearance_embedding_dim: int = 40,
+            skip_connections: Tuple = (4,),
+            field_heads: Tuple[FieldHead] = (RGBFieldHead(),),
+            spatial_distortion: SpatialDistortion = SceneContraction(),
     ) -> None:
         super().__init__()
         self.aabb = Parameter(aabb, requires_grad=False)
@@ -391,7 +438,7 @@ class TorchNerfactoField(Field):
         return density, base_mlp_out
 
     def get_outputs(
-        self, ray_samples: RaySamples, density_embedding: Optional[TensorType] = None
+            self, ray_samples: RaySamples, density_embedding: Optional[TensorType] = None
     ) -> Dict[FieldHeadNames, TensorType]:
         outputs_shape = ray_samples.frustums.directions.shape[:-1]
 
