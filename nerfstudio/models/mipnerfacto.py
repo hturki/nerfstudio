@@ -130,6 +130,9 @@ class MipNerfactoModelConfig(ModelConfig):
 
     train_with_random_bg: bool = False
 
+    use_all_features: bool = False
+    anneal_features: bool = False
+
 
 class MipNerfactoModel(Model):
     config: MipNerfactoModelConfig
@@ -173,7 +176,9 @@ class MipNerfactoModel(Model):
             use_frustum_area=self.config.use_frustum_area,
             same_color_mlp=self.config.same_color_mlp,
             level_window=self.config.level_window,
-            training_level_jitter=self.config.training_level_jitter
+            training_level_jitter=self.config.training_level_jitter,
+            use_all_features=self.config.use_all_features,
+            anneal_features=self.config.anneal_features
         )
 
         self.density_fns = []

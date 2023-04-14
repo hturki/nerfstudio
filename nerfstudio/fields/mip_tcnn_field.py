@@ -124,6 +124,8 @@ class MipTCNNField(Field):
             level_anneal_cosine: bool = True,
             finest_occ_grid: bool = True,
             cameras: Cameras = None,
+            use_all_features: bool = False,
+            anneal_features: bool = False
     ) -> None:
         super().__init__()
         self.register_buffer("aabb", aabb)
@@ -144,6 +146,9 @@ class MipTCNNField(Field):
         self.same_color_mlp = same_color_mlp
         self.interpolation_model = interpolation_model
         self.finest_occ_grid = finest_occ_grid
+
+        self.use_all_features = use_all_features
+        self.anneal_features = anneal_features
 
         if level_window is not None:
             assert level_window > 0
@@ -207,9 +212,13 @@ class MipTCNNField(Field):
             self.areas.append((area_of_interest / (base_resolution * (per_level_scale ** i))).square())
 
             if interpolation_model not in {InterpolationModel.FEATURE, InterpolationModel.ANNEAL}:
+                if use_all_features:
+                    input_dims = features_per_level * num_levels
+                else:
+                    input_dims = features_per_level * (level_window if level_window is not None else (i + 1))
+
                 mlp_bases.append(tcnn.Network(
-                    n_input_dims=features_per_level * (
-                        level_window if level_window is not None else (i + 1)) + ipe_out_dim,
+                    n_input_dims=input_dims + ipe_out_dim,
                     n_output_dims=1 + self.geo_feat_dim,
                     network_config={
                         "otype": "FullyFusedMLP",
@@ -323,7 +332,11 @@ class MipTCNNField(Field):
         if ray_samples.metadata is not None and EXPLICIT_LEVEL in ray_samples.metadata:
             level = ray_samples.metadata[EXPLICIT_LEVEL]
 
-            if self.level_window is not None:
+            if self.use_all_features:
+                level_features = encoding
+                if self.anneal_features:
+                    level_features[:, (level + 1) * self.features_per_level:] = 0
+            elif self.level_window is not None:
                 level_features = encoding[:,
                                  level * self.features_per_level:(level + self.level_window) * self.features_per_level]
             else:
@@ -342,6 +355,7 @@ class MipTCNNField(Field):
 
             density_before_activation, base_mlp_out = torch.split(h, [1, self.geo_feat_dim], dim=-1)
             density = F.softplus(density_before_activation.to(positions) - 1).view(ray_samples.frustums.starts.shape)
+
             return density, base_mlp_out
 
         pixel_areas = get_pixel_areas(ray_samples.frustums.starts, ray_samples.frustums.ends,
@@ -356,9 +370,10 @@ class MipTCNNField(Field):
             level_weights = [None] * len(level_indices)
             h = None
         else:
-            level_indices, level_weights = get_weights(pixel_areas, self.areas, self.weight_anneal)
+            level_indices, level_weights = get_weights(pixel_areas, self.areas, self.weight_anneal,
+                                                       self.anneal_features)
 
-            if interpolation_model == InterpolationModel.MLP_RGB:
+            if self.interpolation_model == InterpolationModel.MLP_RGB:
                 density = None
                 level_embeddings = []
             elif self.interpolation_model == InterpolationModel.MLP_DENSITY:
@@ -370,7 +385,14 @@ class MipTCNNField(Field):
 
         for level, (cur_level_indices, cur_level_weights) in enumerate(zip(level_indices, level_weights)):
             if cur_level_indices.shape[0] > 0:
-                if self.level_window:
+                if self.use_all_features:
+                    level_features = encoding[cur_level_indices]
+                    if self.anneal_features:
+                        level_features[:,
+                        (level + 1) * self.features_per_level:(level + 2) * self.features_per_level:] *= (
+                                    1 - cur_level_weights.unsqueeze(-1))
+                        level_features[:, (level + 2) * self.features_per_level:] = 0
+                elif self.level_window:
                     level_features = \
                         encoding[cur_level_indices,
                         level * self.features_per_level:(level + self.level_window) * self.features_per_level]
@@ -391,13 +413,19 @@ class MipTCNNField(Field):
                     if density is None:
                         density = torch.zeros(positions_flat.shape[0], *level_density.shape[1:],
                                               dtype=level_density.dtype, device=level_density.device)
-                    density[cur_level_indices] += cur_level_weights.unsqueeze(-1) * level_density
+                    if self.anneal_features:
+                        density[cur_level_indices] = level_density
+                    else:
+                        density[cur_level_indices] += cur_level_weights.unsqueeze(-1) * level_density
                 elif self.interpolation_model == InterpolationModel.MLP_DENSITY:
                     level_h = self.mlp_bases[level](level_features)
                     if interpolated_h is None:
                         interpolated_h = torch.zeros(positions_flat.shape[0], *level_h.shape[1:],
                                                      dtype=level_h.dtype, device=level_h.device)
-                    interpolated_h[cur_level_indices] += cur_level_weights.unsqueeze(-1) * level_h
+                    if self.anneal_features:
+                        interpolated_h[cur_level_indices] = level_h
+                    else:
+                        interpolated_h[cur_level_indices] += cur_level_weights.unsqueeze(-1) * level_h
                 elif self.interpolation_model == InterpolationModel.FEATURE:
                     if interpolated_features is None:
                         interpolated_features = torch.zeros(positions_flat.shape[0], *level_features.shape[1:],
@@ -575,7 +603,8 @@ class MipTCNNField(Field):
 
 
 @torch.jit.script
-def get_weights(pixel_areas: torch.Tensor, areas: list[float], weight_anneal: Optional[float] = None) -> Tuple[
+def get_weights(pixel_areas: torch.Tensor, areas: list[float], weight_anneal: Optional[float] = None,
+                only_first: bool = False) -> Tuple[
     List[torch.Tensor], List[torch.Tensor]]:
     sorted_pixel_areas, ordering = pixel_areas.sort(descending=True)
     level_indices = []
@@ -595,11 +624,15 @@ def get_weights(pixel_areas: torch.Tensor, areas: list[float], weight_anneal: Op
         else:
             start = mid
             mid = end
-            cur_level_indices = [ordering[start:mid]]
-            if weight_anneal is not None and i == num_levels - 1:
-                cur_level_weights = [final_level_annealed_first_weights]
+            if only_first:
+                cur_level_indices = []
+                cur_level_weights = []
             else:
-                cur_level_weights = [1 - last_weights]
+                cur_level_indices = [ordering[start:mid]]
+                if weight_anneal is not None and i == num_levels - 1:
+                    cur_level_weights = [final_level_annealed_first_weights]
+                else:
+                    cur_level_weights = [1 - last_weights]
 
         if i < num_levels - 1:
             end = mid + (sorted_pixel_areas[mid:] > areas[i + 1]).sum()
@@ -671,6 +704,6 @@ def interpolation_model(model: str) -> InterpolationModel:
     if model.casefold() == 'ipe':
         return InterpolationModel.IPE
     if model.casefold() == 'anneal':
-        return InterpolationModel.IPE
+        return InterpolationModel.ANNEAL
     else:
         raise Exception(model)
