@@ -38,7 +38,8 @@ from nerfstudio.engine.callbacks import (
 from nerfstudio.field_components.field_heads import FieldHeadNames
 from nerfstudio.field_components.spatial_distortions import SceneContraction
 from nerfstudio.fields.density_fields import HashMLPDensityField
-from nerfstudio.fields.mip_tcnn_field import MipTCNNField, EXPLICIT_LEVEL, interpolation_model
+from nerfstudio.fields.mip_tcnn_field import MipTCNNField, EXPLICIT_LEVEL, interpolation_model, level_features, \
+    auxiliary_info
 from nerfstudio.model_components.losses import (
     MSELoss,
     distortion_loss,
@@ -119,19 +120,22 @@ class MipNerfactoModelConfig(ModelConfig):
     disable_scene_contraction: bool = False
     """Whether to disable scene contraction or not."""
 
-    interpolation_model: Literal["mlp_rgb", "mlp_density", "feature", "ipe", "anneal"] = "ipe"
-    use_frustum_area: bool = False
-    same_color_mlp: bool = True
-    level_window: Optional[int] = None
+    grid_loss_mult: float = 0.1
+
+    interpolation_model: Literal["mlp_rgb", "mlp_density", "single"] = "mlp_rgb"
+    level_features: Literal["truncate", "anneal", "full"] = "truncate"
+    auxiliary_info: Literal["none", "scale", "all_scales", "cov", "ipe", "ipe_grid"] = "none"
+    interpolate_levels: bool = True
+    train_lod_bias: bool = False
+    freq_dim: int = 4
+    freq_resolution: int = 8192
+    do_residual: bool = False
     training_level_jitter: float = 0
 
     appearance_embedding_dim: int = 32
     features_per_level: int = 8
 
     train_with_random_bg: bool = False
-
-    use_all_features: bool = False
-    anneal_features: bool = False
 
 
 class MipNerfactoModel(Model):
@@ -173,12 +177,14 @@ class MipNerfactoModel(Model):
             num_levels=self.config.num_levels,
             log2_hashmap_size=self.config.log2_hashmap_size,
             interpolation_model=interpolation_model(self.config.interpolation_model),
-            use_frustum_area=self.config.use_frustum_area,
-            same_color_mlp=self.config.same_color_mlp,
-            level_window=self.config.level_window,
+            level_features=level_features(self.config.level_features),
+            auxiliary_info=auxiliary_info(self.config.auxiliary_info),
+            interpolate_levels=self.config.interpolate_levels,
+            train_lod_bias=self.config.train_lod_bias,
+            freq_dim=self.config.freq_dim,
+            freq_resolution=self.config.freq_resolution,
+            do_residual=self.config.do_residual,
             training_level_jitter=self.config.training_level_jitter,
-            use_all_features=self.config.use_all_features,
-            anneal_features=self.config.anneal_features
         )
 
         self.density_fns = []
@@ -258,6 +264,9 @@ class MipNerfactoModel(Model):
                     mlps += child.parameters()
                 else:
                     fields += child.parameters()
+
+        if self.config.train_lod_bias:
+            fields.append(self.field.lod_bias)
 
         return {
             'mlps': mlps,
@@ -339,9 +348,12 @@ class MipNerfactoModel(Model):
         if self.training:
             outputs["weights_list"] = weights_list
             outputs["ray_samples_list"] = ray_samples_list
-            outputs["level_counts"] = field_outputs[FieldHeadNames.LEVEL_COUNTS]
+            if self.config.interpolation_model.casefold() != 'single':
+                outputs["level_counts"] = field_outputs[FieldHeadNames.LEVEL_COUNTS]
         else:
-            outputs["levels"] = self.renderer_level(weights=weights, semantics=field_outputs[FieldHeadNames.LEVELS])
+            levels = field_outputs[FieldHeadNames.LEVELS]
+            outputs["levels"] = self.renderer_level(weights=weights,
+                                                    semantics=levels.clamp(0, len(self.field.scales) - 1))
 
         for i in range(self.config.num_proposal_iterations):
             outputs[f"prop_depth_{i}"] = self.renderer_depth(weights=weights_list[i], ray_samples=ray_samples_list[i])
@@ -356,8 +368,12 @@ class MipNerfactoModel(Model):
             metrics_dict["distortion"] = distortion_loss(outputs["weights_list"], outputs["ray_samples_list"])
             metrics_dict["interlevel"] = interlevel_loss(outputs["weights_list"], outputs["ray_samples_list"])
 
-            for key, val in outputs["level_counts"].items():
-                metrics_dict[f"level_counts_{key}"] = val
+            if self.config.interpolation_model.casefold() != 'single':
+                for key, val in outputs["level_counts"].items():
+                    metrics_dict[f"level_counts_{key}"] = val
+
+            if self.config.train_lod_bias:
+                metrics_dict["lod_bias"] = self.field.lod_bias
 
         return metrics_dict
 
@@ -372,6 +388,14 @@ class MipNerfactoModel(Model):
         if self.training:
             loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * metrics_dict["interlevel"]
             loss_dict["distortion_loss"] = self.config.distortion_loss_mult * metrics_dict["distortion"]
+
+            if self.config.grid_loss_mult > 0:
+                grid_weight_decay = 0
+                offsets = self.field.grid_offsets
+                for i in range(len(offsets) - 1):
+                    grid_weight_decay += self.field.encoding.params[offsets[i]:offsets[i + 1]].square().mean()
+
+                loss_dict["grid_weight_loss"] = self.config.grid_loss_mult * grid_weight_decay
 
         return loss_dict
 
@@ -388,7 +412,14 @@ class MipNerfactoModel(Model):
 
         combined_rgb = torch.cat([image, rgb], dim=1)
         combined_acc = torch.cat([acc], dim=1)
-        combined_depth = torch.cat([depth], dim=1)
+        depth_vis = []
+        if "depth_image" in batch:
+            depth_vis.append(colormaps.apply_depth_colormap(
+                batch["depth_image"] * outputs["directions_norm"],
+            ))
+
+        depth_vis.append(depth)
+        combined_depth = torch.cat(depth_vis, dim=1)
 
         images_dict = {"img": combined_rgb, "accumulation": combined_acc, "depth": combined_depth}
 

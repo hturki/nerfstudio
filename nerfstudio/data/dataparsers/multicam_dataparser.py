@@ -43,6 +43,8 @@ class MulticamDataParserConfig(DataParserConfig):
     alpha_color: Optional[str] = "white"
     """alpha color of background"""
 
+    square_bounds: bool = True
+
 
 @dataclass
 class Multicam(DataParser):
@@ -94,6 +96,10 @@ class Multicam(DataParser):
         camera_to_world[..., 3] *= self.scale_factor
         if "scene_bounds" in base_meta:
             bounds = torch.FloatTensor(base_meta["scene_bounds"])
+            if self.config.square_bounds:
+                radius = bounds.abs().max()
+                bounds = torch.tensor([[-radius, -radius, -radius], [radius, radius, radius]], dtype=torch.float32)
+
         else:
             radius = 1.3 if "ship" not in str(self.data) else 1.5
             bounds = torch.tensor([[-radius, -radius, -radius], [radius, radius, radius]], dtype=torch.float32)

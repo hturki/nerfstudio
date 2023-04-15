@@ -533,6 +533,13 @@ class VanillaDataManager(DataManager):  # pylint: disable=abstract-method
         batch = self.train_pixel_sampler.sample(image_batch)
         ray_indices = batch["indices"]
         ray_bundle = self.train_ray_generator(ray_indices)
+
+        if "depth_image" in batch:
+            if ray_bundle.metadata is None:
+                ray_bundle.metadata = {}
+
+            ray_bundle.metadata["depth_image"] = batch["depth_image"]
+
         return ray_bundle, batch
 
     def next_eval(self, step: int) -> Tuple[RayBundle, Dict]:
