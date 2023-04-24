@@ -27,7 +27,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from nerfacc import ContractionType
-from torch.nn import Parameter, SmoothL1Loss
+from torch.nn import Parameter, SmoothL1Loss, HuberLoss
 from torchmetrics import PeakSignalNoiseRatio
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from typing_extensions import Literal
@@ -89,6 +89,9 @@ class InstantNGPModelConfig(ModelConfig):
     background_color: Literal["random", "black", "white"] = "random"
     """The color that is given to untrained areas."""
 
+    hidden_dim: int = 64
+    hidden_dim_color: int = 64
+
     depth_lambda: float = 0
     num_levels: int = 16
     features_per_level: int = 8
@@ -129,7 +132,9 @@ class NGPModel(Model):
             log2_hashmap_size=self.config.log2_hashmap_size,
             max_res=self.config.max_res,
             num_levels=self.config.num_levels,
-            features_per_level=self.config.features_per_level
+            features_per_level=self.config.features_per_level,
+            hidden_dim=self.config.hidden_dim,
+            hidden_dim_color=self.config.hidden_dim_color,
         )
 
         self.scene_aabb = Parameter(self.scene_box.aabb.flatten(), requires_grad=False)
@@ -159,7 +164,7 @@ class NGPModel(Model):
         self.renderer_depth = DepthRenderer(method="expected")
 
         # losses
-        self.rgb_loss = SmoothL1Loss(reduction='none')
+        self.rgb_loss = HuberLoss(reduction='none')
 
         # metrics
         self.psnr = PeakSignalNoiseRatio(data_range=1.0)
@@ -261,7 +266,7 @@ class NGPModel(Model):
 
         rgb_loss = self.rgb_loss(image[mask], outputs["rgb"][mask])
         if "weights" in batch:
-            weights = batch["weights"].to(self.device).unsqueeze(-1)
+            weights = batch["weights"].to(self.device).view(-1, 1)
             rgb_loss *= weights[mask]
 
         loss_dict = {"rgb_loss": rgb_loss.mean()}
@@ -308,6 +313,12 @@ class NGPModel(Model):
             "alive_ray_mask": combined_alive_ray_mask,
         }
 
+        if "mask" in batch:
+            mask = batch["mask"]
+            assert torch.all(mask[:, mask.sum(dim=0) > 0])
+            image = image[:, mask.sum(dim=0).squeeze() > 0]
+            rgb = rgb[:, mask.sum(dim=0).squeeze() > 0]
+
         ssim = self.ssim(image, rgb)
 
         # Switch images from [H, W, C] to [1, C, H, W] for metrics computations
@@ -316,12 +327,10 @@ class NGPModel(Model):
 
         psnr = self.psnr(image, rgb)
         lpips = self.lpips(image, rgb)
-
         mse = np.exp(-0.1 * np.log(10.) * float(psnr.item()))
         dssim = np.sqrt((1 - float(ssim)) / 2)
         avg_error = np.exp(np.mean(np.log(np.array([mse, dssim, float(lpips)]))))
 
-        # all of these metrics will be logged as scalars
         # all of these metrics will be logged as scalars
         metrics_dict = {
             "psnr": float(psnr.item()),

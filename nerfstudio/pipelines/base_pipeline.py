@@ -46,7 +46,7 @@ from nerfstudio.data.datamanagers.base_datamanager import (
     VanillaDataManager,
     VanillaDataManagerConfig,
 )
-from nerfstudio.data.dataparsers.adop_dataparser import TRAIN_INDICES
+from nerfstudio.data.dataparsers.adop_dataparser import TRAIN_INDICES, WEIGHTS
 from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttributes
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import profiler
@@ -355,6 +355,8 @@ class VanillaPipeline(Pipeline):
                     train_indices = self.datamanager.eval_dataparser_outputs.metadata[TRAIN_INDICES].to(
                         camera_ray_bundle.camera_indices.device)
                     camera_ray_bundle.metadata[TRAIN_INDICES] = train_indices[camera_ray_bundle.camera_indices]
+                    weights = self.datamanager.eval_dataparser_outputs.metadata[WEIGHTS].to(camera_ray_bundle.camera_indices.device)
+                    batch[WEIGHTS] = weights[camera_ray_bundle.camera_indices]
 
                 outputs = self.model.get_outputs_for_camera_ray_bundle(camera_ray_bundle)
                 metrics_dict, images = self.model.get_image_metrics_and_images(outputs, batch)

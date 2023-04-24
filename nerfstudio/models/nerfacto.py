@@ -19,7 +19,7 @@ NeRF implementation that combines many recent advancements.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Type
+from typing import Dict, List, Tuple, Type, Any
 
 import numpy as np
 import torch
@@ -56,7 +56,7 @@ from nerfstudio.model_components.renderers import (
     NormalsRenderer,
     RGBRenderer,
 )
-from nerfstudio.model_components.scene_colliders import NearFarCollider
+from nerfstudio.model_components.scene_colliders import NearFarCollider, AABBBoxCollider
 from nerfstudio.model_components.shaders import NormalsShader
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.models.mip_instant_ngp import ssim
@@ -137,6 +137,12 @@ class NerfactoModelConfig(ModelConfig):
     appearance_embedding_dim: int = 32
     use_ipe: bool = False
 
+    force_weight_1: bool = False
+
+    train_with_random_bg: bool = False
+    debug: bool = False
+
+
 class NerfactoModel(Model):
     """Nerfacto model
 
@@ -146,14 +152,25 @@ class NerfactoModel(Model):
 
     config: NerfactoModelConfig
 
+    def __init__(self, config: NerfactoModelConfig, metadata: Dict[str, Any], **kwargs) -> None:
+        self.near = metadata.get("near", None)
+        self.far = metadata.get("far", None)
+        super().__init__(config=config, **kwargs)
+
     def populate_modules(self):
         """Set the fields and modules."""
         super().populate_modules()
 
+        near = self.near if self.near is not None else self.config.near_plane
+        far = self.far if self.far is not None else self.config.far_plane
+
         if self.config.disable_scene_contraction:
             scene_contraction = None
+            self.collider = AABBBoxCollider(self.scene_box, near_plane=near)
         else:
             scene_contraction = SceneContraction(order=float("inf"))
+            # Collider
+            self.collider = NearFarCollider(near_plane=near, far_plane=far)
 
         # Fields
         self.field = TCNNNerfactoField(
@@ -169,8 +186,8 @@ class NerfactoModel(Model):
             use_pred_normals=self.config.predict_normals,
             use_train_appearance_embedding=self.config.use_train_appearance_embedding,
             use_average_appearance_embedding=self.config.use_average_appearance_embedding,
-            appearance_embedding_dim = self.config.appearance_embedding_dim,
-            use_ipe = self.config.use_ipe,
+            appearance_embedding_dim=self.config.appearance_embedding_dim,
+            use_ipe=self.config.use_ipe,
             features_per_level=self.config.features_per_level,
         )
 
@@ -183,7 +200,7 @@ class NerfactoModel(Model):
         for i in range(num_prop_nets, 0, -1):
             proposal_net_args_list.append({
                 "hidden_dim": 16,
-                "log2_hashmap_size": self.config.log2_hashmap_size,
+                "log2_hashmap_size": 19, #self.config.log2_hashmap_size,
                 "num_levels": self.config.num_levels,
                 "base_res": 16,
                 "max_res": self.config.max_res // (2 ** (i - 1)),
@@ -228,9 +245,6 @@ class NerfactoModel(Model):
             initial_sampler=initial_sampler,
         )
 
-        # Collider
-        self.collider = NearFarCollider(near_plane=self.config.near_plane, far_plane=self.config.far_plane)
-
         # renderers
         self.renderer_rgb = RGBRenderer(background_color=self.config.background_color)
         self.renderer_accumulation = AccumulationRenderer()
@@ -241,11 +255,11 @@ class NerfactoModel(Model):
         self.normals_shader = NormalsShader()
 
         # losses
-        self.rgb_loss = MSELoss()
+        self.rgb_loss = MSELoss(reduction='none')
 
         # metrics
         self.psnr = PeakSignalNoiseRatio(data_range=1.0)
-        self.ssim = ssim #structural_similarity_index_measure
+        self.ssim = ssim  # structural_similarity_index_measure
         self.lpips = LearnedPerceptualImagePatchSimilarity(normalize=True)
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
@@ -256,7 +270,7 @@ class NerfactoModel(Model):
         return param_groups
 
     def get_training_callbacks(
-        self, training_callback_attributes: TrainingCallbackAttributes
+            self, training_callback_attributes: TrainingCallbackAttributes
     ) -> List[TrainingCallback]:
         callbacks = []
         if self.config.use_proposal_weight_anneal:
@@ -288,6 +302,10 @@ class NerfactoModel(Model):
 
     def get_outputs(self, ray_bundle: RayBundle):
         ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
+
+        if self.config.force_weight_1:
+            ray_samples.deltas[..., -1, 0] = 1e10
+
         field_outputs = self.field(ray_samples, compute_normals=self.config.predict_normals)
         weights = ray_samples.get_weights(field_outputs[FieldHeadNames.DENSITY])
         weights_list.append(weights)
@@ -341,9 +359,14 @@ class NerfactoModel(Model):
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
-        loss_dict = {}
         image = batch["image"].to(self.device)
-        loss_dict["rgb_loss"] = self.rgb_loss(image, outputs["rgb"])
+        rgb_loss = self.rgb_loss(image, outputs["rgb"])
+        if "weights" in batch:
+            weights = batch["weights"].to(self.device).view(-1, 1)
+            rgb_loss *= weights
+
+        loss_dict = {"rgb_loss": rgb_loss.mean()}
+
         if self.training:
             assert metrics_dict is not None and "distortion" in metrics_dict
 
@@ -362,7 +385,7 @@ class NerfactoModel(Model):
         return loss_dict
 
     def get_image_metrics_and_images(
-        self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
+            self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
     ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
         image = batch["image"].to(self.device)
         rgb = outputs["rgb"]
@@ -398,12 +421,27 @@ class NerfactoModel(Model):
 
         psnr = self.psnr(image, rgb)
         lpips = self.lpips(image, rgb)
+        mse = np.exp(-0.1 * np.log(10.) * float(psnr.item()))
+        dssim = np.sqrt((1 - float(ssim)) / 2)
+        avg_error = np.exp(np.mean(np.log(np.array([mse, dssim, float(lpips)]))))
 
         # all of these metrics will be logged as scalars
-        metrics_dict = {"psnr": float(psnr.item()), "ssim": float(ssim)}  # type: ignore
-        metrics_dict["lpips"] = float(lpips)
+        metrics_dict = {
+            "psnr": float(psnr.item()),
+            "ssim": float(ssim),
+            "lpips": float(lpips),
+            "avg_error": avg_error
+        }  # type: ignore
 
         images_dict = {"img": combined_rgb, "accumulation": combined_acc, "depth": combined_depth}
+
+        if "weights" in batch:
+            weight = torch.unique(batch["weights"]).item()
+            for key, val in set(metrics_dict.items()):
+                metrics_dict[f"{key}_{weight}"] = val
+            for key, val in set(images_dict.items()):
+                if 'level' not in key:
+                    images_dict[f"{key}_{weight}"] = val
 
         for i in range(self.config.num_proposal_iterations):
             key = f"prop_depth_{i}"

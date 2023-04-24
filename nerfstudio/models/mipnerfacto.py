@@ -18,12 +18,13 @@ NeRF implementation that combines many recent advancements.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Type, Optional, Any
 
 import numpy as np
 import torch
-from nerfstudio.utils.colors import get_color
+import torch.nn.functional as F
 from torch.nn import Parameter
 from torchmetrics import PeakSignalNoiseRatio
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
@@ -47,7 +48,7 @@ from nerfstudio.model_components.losses import (
 )
 from nerfstudio.model_components.ray_samplers import (
     ProposalNetworkSampler,
-    UniformSampler,
+    UniformSampler, UniformLinDispPiecewiseSampler,
 )
 from nerfstudio.model_components.renderers import (
     AccumulationRenderer,
@@ -58,6 +59,7 @@ from nerfstudio.model_components.scene_colliders import NearFarCollider, AABBBox
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.models.mip_instant_ngp import ssim
 from nerfstudio.utils import colormaps
+from nerfstudio.utils.colors import get_color
 
 
 @dataclass
@@ -125,8 +127,9 @@ class MipNerfactoModelConfig(ModelConfig):
     interpolation_model: Literal["mlp_rgb", "mlp_density", "single"] = "mlp_rgb"
     level_features: Literal["truncate", "anneal", "full"] = "truncate"
     auxiliary_info: Literal["none", "scale", "cov", "ipe", "ipe_grid"] = "none"
-    separate_encodings: Optional[int] = None
-    separate_encoding_scale: float = 2
+    num_scales: Optional[int] = None
+    scale_factor: Optional[float] = None
+    separate_encoding: bool = True
     interpolate_levels: bool = True
     lod_bias: int = 0
     train_lod_bias: bool = False
@@ -139,6 +142,11 @@ class MipNerfactoModelConfig(ModelConfig):
     features_per_level: int = 8
 
     train_with_random_bg: bool = False
+
+    use_proposal_network: bool = True
+    debug: bool = False
+
+    force_weight_1: bool = False
 
 
 class MipNerfactoModel(Model):
@@ -156,8 +164,11 @@ class MipNerfactoModel(Model):
         near = self.near if self.near is not None else self.config.near_plane
         far = self.far if self.far is not None else self.config.far_plane
 
-        if self.config.separate_encodings == 0:
-            self.config.separate_encodings = None
+        if self.config.scale_factor == 0:
+            self.config.scale_factor = None
+
+        if self.config.num_scales == 0:
+            self.config.num_scales = None
 
         if self.config.disable_scene_contraction:
             scene_contraction = None
@@ -185,8 +196,9 @@ class MipNerfactoModel(Model):
             interpolation_model=interpolation_model(self.config.interpolation_model),
             level_features=level_features(self.config.level_features),
             auxiliary_info=auxiliary_info(self.config.auxiliary_info),
-            separate_encodings=self.config.separate_encodings,
-            separate_encoding_scale=self.config.separate_encoding_scale,
+            num_scales=self.config.num_scales,
+            scale_factor=self.config.scale_factor,
+            separate_encoding=self.config.separate_encoding,
             interpolate_levels=self.config.interpolate_levels,
             training_level_jitter=self.config.training_level_jitter,
             lod_bias=self.config.lod_bias,
@@ -194,61 +206,71 @@ class MipNerfactoModel(Model):
             freq_dim=self.config.freq_dim,
             freq_resolution=self.config.freq_resolution,
             do_residual=self.config.do_residual,
+            debug=self.config.debug
         )
 
-        self.density_fns = []
-        num_prop_nets = self.config.num_proposal_iterations
-        # Build the proposal network(s)
-        self.proposal_networks = torch.nn.ModuleList()
+        if self.config.use_proposal_network:
+            self.density_fns = []
+            num_prop_nets = self.config.num_proposal_iterations
+            # Build the proposal network(s)
+            self.proposal_networks = torch.nn.ModuleList()
 
-        proposal_net_args_list = []
-        for i in range(num_prop_nets, 0, -1):
-            proposal_net_args_list.append({
-                "hidden_dim": 16,
-                "log2_hashmap_size": self.config.log2_hashmap_size,
-                "num_levels": self.config.num_levels,
-                "base_res": self.config.base_resolution,
-                "max_res": self.config.max_resolution // (2 ** (i - 1)),
-                "use_linear": False
-            })
-
-        if self.config.use_same_proposal_network:
-            assert len(proposal_net_args_list) == 1, "Only one proposal network is allowed."
-            prop_net_args = proposal_net_args_list[0]
-            network = HashMLPDensityField(self.scene_box.aabb, spatial_distortion=scene_contraction, **prop_net_args)
-            self.proposal_networks.append(network)
-            self.density_fns.extend([network.density_fn for _ in range(num_prop_nets)])
-        else:
+            proposal_net_args_list = []
+            levels = [6, 8]
+            max_res = [512, 2048]
             for i in range(num_prop_nets):
-                prop_net_args = proposal_net_args_list[min(i, len(proposal_net_args_list) - 1)]
-                network = HashMLPDensityField(
-                    self.scene_box.aabb,
-                    spatial_distortion=scene_contraction,
-                    **prop_net_args,
-                )
+                proposal_net_args_list.append({
+                    "hidden_dim": 16,
+                    "log2_hashmap_size": 19, #self.config.log2_hashmap_size,
+                    "num_levels": levels[i],
+                    "base_res": self.config.base_resolution,
+                    "max_res": max_res[i],
+                    "use_linear": False
+                })
+
+            if self.config.use_same_proposal_network:
+                assert len(proposal_net_args_list) == 1, "Only one proposal network is allowed."
+                prop_net_args = proposal_net_args_list[0]
+                network = HashMLPDensityField(self.scene_box.aabb, spatial_distortion=scene_contraction,
+                                              **prop_net_args)
                 self.proposal_networks.append(network)
-            self.density_fns.extend([network.density_fn for network in self.proposal_networks])
+                self.density_fns.extend([network.density_fn for _ in range(num_prop_nets)])
+            else:
+                for i in range(num_prop_nets):
+                    prop_net_args = proposal_net_args_list[min(i, len(proposal_net_args_list) - 1)]
+                    network = HashMLPDensityField(
+                        self.scene_box.aabb,
+                        spatial_distortion=scene_contraction,
+                        **prop_net_args,
+                    )
+                    self.proposal_networks.append(network)
+                self.density_fns.extend([network.density_fn for network in self.proposal_networks])
 
-        # Samplers
-        update_schedule = lambda step: np.clip(
-            np.interp(step, [0, self.config.proposal_warmup], [0, self.config.proposal_update_every]),
-            1,
-            self.config.proposal_update_every,
-        )
+            # Samplers
+            update_schedule = lambda step: np.clip(
+                np.interp(step, [0, self.config.proposal_warmup], [0, self.config.proposal_update_every]),
+                1,
+                self.config.proposal_update_every,
+            )
 
-        # Change proposal network initial sampler if uniform
-        initial_sampler = None  # None is for piecewise as default (see ProposalNetworkSampler)
-        if self.config.proposal_initial_sampler == "uniform":
-            initial_sampler = UniformSampler(single_jitter=self.config.use_single_jitter)
+            # Change proposal network initial sampler if uniform
+            initial_sampler = None  # None is for piecewise as default (see ProposalNetworkSampler)
+            if self.config.proposal_initial_sampler == "uniform":
+                initial_sampler = UniformSampler(single_jitter=self.config.use_single_jitter)
 
-        self.proposal_sampler = ProposalNetworkSampler(
-            num_nerf_samples_per_ray=self.config.num_nerf_samples_per_ray,
-            num_proposal_samples_per_ray=self.config.num_proposal_samples_per_ray,
-            num_proposal_network_iterations=self.config.num_proposal_iterations,
-            single_jitter=self.config.use_single_jitter,
-            update_sched=update_schedule,
-            initial_sampler=initial_sampler,
-        )
+            self.proposal_sampler = ProposalNetworkSampler(
+                num_nerf_samples_per_ray=self.config.num_nerf_samples_per_ray,
+                num_proposal_samples_per_ray=self.config.num_proposal_samples_per_ray,
+                num_proposal_network_iterations=self.config.num_proposal_iterations,
+                single_jitter=self.config.use_single_jitter,
+                update_sched=update_schedule,
+                initial_sampler=initial_sampler,
+            )
+        else:
+            if self.config.proposal_initial_sampler == "uniform":
+                self.proposal_sampler = UniformSampler(num_samples=self.config.num_nerf_samples_per_ray)
+            else:
+                self.proposal_sampler = UniformLinDispPiecewiseSampler(num_samples=self.config.num_nerf_samples_per_ray)
 
         # renderers
         self.renderer_rgb = RGBRenderer(background_color=self.config.background_color)
@@ -269,7 +291,9 @@ class MipNerfactoModel(Model):
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         mlps = []
         fields = []
-        for children in [self.field.named_children(), self.proposal_networks.named_children()]:
+        field_children = [self.field.named_children()]
+
+        for children in field_children:
             for name, child in children:
                 if 'mlp' in name:
                     mlps += child.parameters()
@@ -279,16 +303,21 @@ class MipNerfactoModel(Model):
         if self.config.train_lod_bias:
             fields.append(self.field.lod_bias)
 
-        return {
+        param_groups = {
             'mlps': mlps,
             'fields': fields,
         }
+
+        if self.config.use_proposal_network:
+            param_groups['proposal_networks'] = list(self.proposal_networks.parameters())
+
+        return param_groups
 
     def get_training_callbacks(
             self, training_callback_attributes: TrainingCallbackAttributes
     ) -> List[TrainingCallback]:
         callbacks = []
-        if self.config.use_proposal_weight_anneal:
+        if self.config.use_proposal_weight_anneal and self.config.use_proposal_network:
             # anneal the weights of the proposal network before doing PDF sampling
             N = self.config.proposal_weights_anneal_max_num_iters
 
@@ -328,7 +357,14 @@ class MipNerfactoModel(Model):
         return outputs
 
     def get_outputs_inner(self, ray_bundle: RayBundle, explicit_level: Optional[int] = None):
-        ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
+        if self.config.use_proposal_network:
+            ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle,
+                                                                                density_fns=self.density_fns)
+        else:
+            ray_samples = self.proposal_sampler(ray_bundle)
+
+        if self.config.force_weight_1:
+            ray_samples.deltas[..., -1, 0] = 1e10
 
         if explicit_level is not None:
             if ray_samples.metadata is None:
@@ -337,10 +373,21 @@ class MipNerfactoModel(Model):
 
         field_outputs = self.field(ray_samples)
         weights = ray_samples.get_weights(field_outputs[FieldHeadNames.DENSITY])
-        weights_list.append(weights)
-        ray_samples_list.append(ray_samples)
 
         outputs = {}
+
+        if self.config.use_proposal_network:
+            weights_list.append(weights)
+            ray_samples_list.append(ray_samples)
+
+            if explicit_level is None:
+                for i in range(self.config.num_proposal_iterations):
+                    outputs[f"prop_depth_{i}"] = self.renderer_depth(weights=weights_list[i],
+                                                                     ray_samples=ray_samples_list[i])
+
+            if self.training:
+                outputs["weights_list"] = weights_list
+                outputs["ray_samples_list"] = ray_samples_list
 
         if self.training and self.config.train_with_random_bg:
             background = torch.rand_like(ray_bundle.origins)
@@ -355,18 +402,13 @@ class MipNerfactoModel(Model):
         if explicit_level is None:
             outputs["accumulation"] = self.renderer_accumulation(weights=weights)
 
-        # These use a lot of GPU memory, so we avoid storing them for eval.
-        if self.training:
-            outputs["weights_list"] = weights_list
-            outputs["ray_samples_list"] = ray_samples_list
-            outputs["level_counts"] = field_outputs[FieldHeadNames.LEVEL_COUNTS]
-        else:
-            levels = field_outputs[FieldHeadNames.LEVELS]
-            outputs["levels"] = self.renderer_level(weights=weights,
-                                                    semantics=levels.clamp(0, self.field.num_scales - 1))
-
-        for i in range(self.config.num_proposal_iterations):
-            outputs[f"prop_depth_{i}"] = self.renderer_depth(weights=weights_list[i], ray_samples=ray_samples_list[i])
+            # These use a lot of GPU memory, so we avoid storing them for eval.
+            if self.training:
+                outputs["level_counts"] = field_outputs[FieldHeadNames.LEVEL_COUNTS]
+            else:
+                levels = field_outputs[FieldHeadNames.LEVELS]
+                outputs["levels"] = self.renderer_level(weights=weights,
+                                                        semantics=levels.clamp(0, self.field.num_scales - 1))
 
         return outputs
 
@@ -374,9 +416,14 @@ class MipNerfactoModel(Model):
         metrics_dict = {}
         image = self._get_image(batch, outputs)
         metrics_dict["psnr"] = self.psnr(outputs["rgb"], image)
+
+        if "depth_image" in batch:
+            metrics_dict["depth"] = F.mse_loss(outputs["depth"], batch["depth_image"] * outputs["directions_norm"])
+
         if self.training:
-            metrics_dict["distortion"] = distortion_loss(outputs["weights_list"], outputs["ray_samples_list"])
-            metrics_dict["interlevel"] = interlevel_loss(outputs["weights_list"], outputs["ray_samples_list"])
+            if self.config.use_proposal_network:
+                metrics_dict["distortion"] = distortion_loss(outputs["weights_list"], outputs["ray_samples_list"])
+                metrics_dict["interlevel"] = interlevel_loss(outputs["weights_list"], outputs["ray_samples_list"])
 
             for key, val in outputs["level_counts"].items():
                 metrics_dict[f"level_counts_{key}"] = val
@@ -392,30 +439,37 @@ class MipNerfactoModel(Model):
         image = self._get_image(batch, outputs)
         rgb_loss = self.rgb_loss(image, outputs["rgb"])
         if "weights" in batch:
-            weights = batch["weights"].to(self.device).unsqueeze(-1)
+            weights = batch["weights"].to(self.device).view(-1, 1)
+            # import pdb; pdb.set_trace()
             rgb_loss *= weights
 
         loss_dict = {"rgb_loss": rgb_loss.mean()}
         if self.training:
-            loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * metrics_dict["interlevel"]
-            loss_dict["distortion_loss"] = self.config.distortion_loss_mult * metrics_dict["distortion"]
+            if self.config.use_proposal_network:
+                loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * metrics_dict["interlevel"]
+                loss_dict["distortion_loss"] = self.config.distortion_loss_mult * metrics_dict["distortion"]
 
-            if self.config.grid_loss_mult > 0 and self.config.level_features.casefold() == "anneal":
-                if self.config.separate_encodings is None:
-                    offsets = [self.field.table_offsets]
-                    encodings = [self.field.encoding]
-                else:
-                    offsets = self.field.table_offsets
-                    encodings = self.field.encodings
-
-                assert len(offsets) == len(encodings)
-
+            if self.config.grid_loss_mult > 0 and (self.config.level_features.casefold() == "anneal"
+                                                   or (self.config.interpolation_model.casefold() == "single"
+                                                       and self.config.level_features.casefold() == "truncate")):
+                offsets = self.field.table_offsets
                 grid_weight_decay = 0
-                for cur_offsets, cur_encoding in zip(offsets, encodings):
-                    for i in range(len(cur_offsets) - 1):
-                        grid_weight_decay += cur_encoding.params[cur_offsets[i]:cur_offsets[i + 1]].square().mean()
+                if self.config.separate_encoding:
+                    encodings = self.field.encodings
+                else:
+                    encodings = [self.field.encoding]
+
+                for encoding in encodings:
+                    for i in range(len(offsets) - 1):
+                        if offsets[i] >= encoding.params.shape[0]:
+                            break
+                        grid_weight_decay += encoding.params[offsets[i]:offsets[i + 1]].square().mean()
 
                 loss_dict["grid_weight_loss"] = self.config.grid_loss_mult * grid_weight_decay
+
+            for key, val in loss_dict.items():
+                if not math.isfinite(val):
+                    raise Exception('Loss is not finite: {}'.format(loss_dict))
 
         return loss_dict
 
@@ -454,6 +508,12 @@ class MipNerfactoModel(Model):
                     accumulation=outputs["accumulation"],
                 )
 
+        if "mask" in batch:
+            mask = batch["mask"]
+            assert torch.all(mask[:, mask.sum(dim=0) > 0])
+            image = image[:, mask.sum(dim=0).squeeze() > 0]
+            rgb = rgb[:, mask.sum(dim=0).squeeze() > 0]
+
         ssim = self.ssim(image, rgb)
 
         # Switch images from [H, W, C] to [1, C, H, W] for metrics computations
@@ -474,13 +534,22 @@ class MipNerfactoModel(Model):
             "avg_error": avg_error
         }  # type: ignore
 
-        for i in range(self.config.num_proposal_iterations):
-            key = f"prop_depth_{i}"
-            prop_depth_i = colormaps.apply_depth_colormap(
-                outputs[key],
-                accumulation=outputs["accumulation"],
-            )
-            images_dict[key] = prop_depth_i
+        if "weights" in batch:
+            weight = torch.unique(batch["weights"]).item()
+            for key, val in set(metrics_dict.items()):
+                metrics_dict[f"{key}_{weight}"] = val
+            for key, val in set(images_dict.items()):
+                if 'level' not in key:
+                    images_dict[f"{key}_{weight}"] = val
+
+        if self.config.use_proposal_network:
+            for i in range(self.config.num_proposal_iterations):
+                key = f"prop_depth_{i}"
+                prop_depth_i = colormaps.apply_depth_colormap(
+                    outputs[key],
+                    accumulation=outputs["accumulation"],
+                )
+                images_dict[key] = prop_depth_i
 
         return metrics_dict, images_dict
 

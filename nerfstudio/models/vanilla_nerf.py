@@ -196,7 +196,7 @@ class NeRFModel(Model):
         rgb_loss_fine = self.rgb_loss(image, outputs["rgb_fine"])
 
         if "weights" in batch:
-            weights = batch["weights"].to(self.device).unsqueeze(-1).square()
+            weights = batch["weights"].to(self.device).view(-1, 1)
             rgb_loss_coarse *= weights
             rgb_loss_fine *= weights
 

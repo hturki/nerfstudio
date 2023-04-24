@@ -333,7 +333,7 @@ class MipKPlanesModel(Model):
 
         rgb_loss = self.rgb_loss(image, outputs["rgb"])
         if "weights" in batch:
-            weights = batch["weights"].to(self.device).unsqueeze(-1)
+            weights = batch["weights"].to(self.device).view(-1, 1)
             rgb_loss *= weights
 
         loss_dict = {"rgb_loss": rgb_loss.mean()}

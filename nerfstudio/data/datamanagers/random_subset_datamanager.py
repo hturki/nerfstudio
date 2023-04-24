@@ -92,7 +92,7 @@ class RandomSubsetDataManager(DataManager):
         )
 
         self.iter_train_image_dataloader = iter([])
-        self.train_dataset = InputDataset(self.dataparser.get_dataparser_outputs(split='train', downsamples=[1]))
+        self.train_dataset = InputDataset(self.train_dataparser_outputs)
         self.eval_dataparser_outputs = self.dataparser.get_dataparser_outputs(split='test')
 
         self.eval_camera_optimizer = self.config.camera_optimizer.setup(
@@ -163,7 +163,7 @@ class RandomSubsetDataManager(DataManager):
         ray_bundle.metadata[TRAIN_INDICES] = train_indices[ray_bundle.camera_indices]
 
         weights = self.train_dataparser_outputs.metadata[WEIGHTS].to(ray_bundle.camera_indices.device)
-        ray_bundle.metadata[WEIGHTS] = weights[ray_bundle.camera_indices]
+        batch[WEIGHTS] = weights[ray_bundle.camera_indices]
 
         return ray_bundle, batch
 
@@ -178,12 +178,12 @@ class RandomSubsetDataManager(DataManager):
 
         ray_bundle = self.train_ray_generator(batch[RAY_INDEX])
 
-        if TRAIN_INDICES in self.eval_dataparser_outputs.metadata:
-            if ray_bundle.metadata is None:
-                ray_bundle.metadata = {}
+        # if TRAIN_INDICES in self.eval_dataparser_outputs.metadata:
+        if ray_bundle.metadata is None:
+            ray_bundle.metadata = {}
 
-            train_indices = self.eval_dataparser_outputs.metadata[TRAIN_INDICES].to(ray_bundle.camera_indices.device)
-            ray_bundle.metadata[TRAIN_INDICES] = train_indices[ray_bundle.camera_indices]
+        train_indices = self.eval_dataparser_outputs.metadata[TRAIN_INDICES].to(ray_bundle.camera_indices.device)
+        ray_bundle.metadata[TRAIN_INDICES] = train_indices[ray_bundle.camera_indices]
 
         return ray_bundle, batch
 
@@ -191,12 +191,15 @@ class RandomSubsetDataManager(DataManager):
         image_index = random.choice(self.fixed_indices_eval_dataloader.image_indices)
         ray_bundle, batch = self.fixed_indices_eval_dataloader.get_data_from_image_idx(image_index)
 
-        if TRAIN_INDICES in self.eval_dataparser_outputs.metadata:
-            if ray_bundle.metadata is None:
-                ray_bundle.metadata = {}
+        # if TRAIN_INDICES in self.eval_dataparser_outputs.metadata:
+        if ray_bundle.metadata is None:
+            ray_bundle.metadata = {}
 
-            train_indices = self.eval_dataparser_outputs.metadata[TRAIN_INDICES].to(ray_bundle.camera_indices.device)
-            ray_bundle.metadata[TRAIN_INDICES] = train_indices[ray_bundle.camera_indices]
+        train_indices = self.eval_dataparser_outputs.metadata[TRAIN_INDICES].to(ray_bundle.camera_indices.device)
+        ray_bundle.metadata[TRAIN_INDICES] = train_indices[ray_bundle.camera_indices]
+
+        weights = self.eval_dataparser_outputs.metadata[WEIGHTS].to(ray_bundle.camera_indices.device)
+        batch[WEIGHTS] = weights[ray_bundle.camera_indices]
 
         return image_index, ray_bundle, batch
 

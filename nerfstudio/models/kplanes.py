@@ -354,7 +354,7 @@ class KPlanesModel(Model):
 
         rgb_loss = self.rgb_loss(image, outputs["rgb"])
         if "weights" in batch:
-            weights = batch["weights"].to(self.device).unsqueeze(-1)
+            weights = batch["weights"].to(self.device).view(-1, 1)
             rgb_loss *= weights
 
         loss_dict = {"rgb_loss": rgb_loss.mean()}
@@ -383,6 +383,12 @@ class KPlanesModel(Model):
 
         images_dict = {"img": combined_rgb, "accumulation": combined_acc, "depth": combined_depth}
 
+        if "mask" in batch:
+            mask = batch["mask"]
+            assert torch.all(mask[:, mask.sum(dim=0) > 0])
+            image = image[:, mask.sum(dim=0).squeeze() > 0]
+            rgb = rgb[:, mask.sum(dim=0).squeeze() > 0]
+
         ssim = self.ssim(image, rgb)
 
         # Switch images from [H, W, C] to [1, C, H, W] for metrics computations
@@ -391,7 +397,6 @@ class KPlanesModel(Model):
 
         psnr = self.psnr(image, rgb)
         lpips = self.lpips(image, rgb)
-
         mse = np.exp(-0.1 * np.log(10.) * float(psnr.item()))
         dssim = np.sqrt((1 - float(ssim)) / 2)
         avg_error = np.exp(np.mean(np.log(np.array([mse, dssim, float(lpips)]))))

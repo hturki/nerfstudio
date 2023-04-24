@@ -17,6 +17,7 @@ Code to train model.
 """
 from __future__ import annotations
 
+import copy
 import dataclasses
 import functools
 import os
@@ -394,6 +395,9 @@ class Trainer:
             loss = functools.reduce(torch.add, loss_dict.values())
         self.grad_scaler.scale(loss).backward()  # type: ignore
         self.optimizers.optimizer_scaler_step_all(self.grad_scaler)
+
+        if hasattr(self.pipeline.model, 'debug') and self.pipeline.model.debug:
+            self.last_model = copy.deepcopy(self.pipeline.model)
 
         if self.config.log_gradients:
             total_grad = 0

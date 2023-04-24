@@ -89,6 +89,7 @@ descriptions = {
 method_configs["nerfacto"] = TrainerConfig(
     method_name="nerfacto",
     steps_per_eval_batch=500,
+    steps_per_eval_image=5000,
     steps_per_save=2000,
     max_num_iterations=30001,
     mixed_precision=True,
@@ -122,6 +123,7 @@ method_configs["nerfacto"] = TrainerConfig(
 method_configs["mipnerfacto"] = TrainerConfig(
     method_name="mipnerfacto",
     steps_per_eval_batch=500,
+    steps_per_eval_image=5000,
     steps_per_save=2000,
     max_num_iterations=30001,
     mixed_precision=True,
@@ -130,21 +132,28 @@ method_configs["mipnerfacto"] = TrainerConfig(
             dataparser=AdopDataParserConfig(),
             # dataparser=NerfstudioDataParserConfig(),
             train_num_rays_per_batch=4096,
-            eval_num_rays_per_batch=4096,
+            eval_num_rays_per_batch=2048,
             # camera_optimizer=CameraOptimizerConfig(
             #     mode="SO3xR3", optimizer=AdamOptimizerConfig(lr=6e-4, eps=1e-8, weight_decay=1e-2)
             # ),
         ),
-        model=MipNerfactoModelConfig(eval_num_rays_per_chunk=1 << 15),
+        model=MipNerfactoModelConfig(eval_num_rays_per_chunk=2048),
     ),
     optimizers={
         "mlps": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15, weight_decay=1e-8),
-            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
+            'scheduler': ExponentialDecaySchedulerConfig(lr_final=1e-3, max_steps=30000),
+            # 'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
         },
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
+            'scheduler': ExponentialDecaySchedulerConfig(lr_final=1e-3, max_steps=30000),
+            # 'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
+        },
+        "proposal_networks": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            'scheduler': ExponentialDecaySchedulerConfig(lr_final=1e-3, max_steps=30000),
+            # 'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
         },
     },
     # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
@@ -181,6 +190,45 @@ method_configs["mipnerfacto-bounded"] = TrainerConfig(
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
             'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
         },
+        "proposal_networks": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
+        },
+    },
+    # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+    # vis="viewer",
+    steps_per_eval_all_images=20000
+)
+
+method_configs["nerfacto-bounded"] = TrainerConfig(
+    method_name="nerfacto-bounded",
+    steps_per_eval_batch=500,
+    steps_per_save=2000,
+    max_num_iterations=20001,
+    mixed_precision=True,
+    pipeline=VanillaPipelineConfig(
+        datamanager=WeightedDataManagerConfig(dataparser=MulticamDataParserConfig(), train_num_rays_per_batch=8192),
+        model=NerfactoModelConfig(
+            disable_scene_contraction=True,
+            background_color="white",
+            num_nerf_samples_per_ray=48,
+            proposal_initial_sampler="uniform",
+            near_plane=2,
+            far_plane=6,
+            distortion_loss_mult=0,
+            appearance_embedding_dim=0,
+            eval_num_rays_per_chunk=1 << 15,
+        ),
+    ),
+    optimizers={
+        "proposal_networks": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=20000),
+        },
+        "fields": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=20000),
+        },
     },
     # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
     # vis="viewer",
@@ -200,8 +248,7 @@ method_configs["mipnerfacto-blender-a"] = TrainerConfig(
             background_color="white",
             num_nerf_samples_per_ray=48,
             proposal_initial_sampler="uniform",
-            near_plane=0.07,
-            far_plane=0.68,
+            force_weight_1=True,
             appearance_embedding_dim=0,
             eval_num_rays_per_chunk=1 << 15,
         ),
@@ -212,6 +259,10 @@ method_configs["mipnerfacto-blender-a"] = TrainerConfig(
             'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
         },
         "fields": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
+        },
+        "proposal_networks": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
             'scheduler': CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
         },
@@ -234,10 +285,9 @@ method_configs["nerfacto-blender-a"] = TrainerConfig(
             background_color="white",
             num_nerf_samples_per_ray=48,
             proposal_initial_sampler="uniform",
-            near_plane=0.07,
-            far_plane=0.68,
             appearance_embedding_dim=0,
             eval_num_rays_per_chunk=1 << 15,
+            force_weight_1=True,
         ),
     ),
     optimizers={
@@ -621,7 +671,7 @@ method_configs["tensorf"] = TrainerConfig(
     method_name="tensorf",
     steps_per_eval_batch=500,
     steps_per_save=2000,
-    max_num_iterations=30000,
+    max_num_iterations=40001,
     mixed_precision=False,
     pipeline=VanillaPipelineConfig(
         datamanager=VanillaDataManagerConfig(
@@ -634,15 +684,78 @@ method_configs["tensorf"] = TrainerConfig(
     optimizers={
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=0.001),
-            "scheduler": ExponentialDecaySchedulerConfig(lr_final=0.0001, max_steps=30000),
+            "scheduler": ExponentialDecaySchedulerConfig(lr_final=0.0001, max_steps=40000),
         },
         "encodings": {
             "optimizer": AdamOptimizerConfig(lr=0.02),
-            "scheduler": ExponentialDecaySchedulerConfig(lr_final=0.002, max_steps=30000),
+            "scheduler": ExponentialDecaySchedulerConfig(lr_final=0.002, max_steps=40000),
         },
     },
-    viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
-    vis="viewer",
+    # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+    # vis="viewer",
+    steps_per_eval_all_images=40000
+)
+
+method_configs["tensorf-blender-a"] = TrainerConfig(
+    method_name="tensorf-blender-a",
+    steps_per_eval_batch=500,
+    steps_per_save=2000,
+    max_num_iterations=60001,
+    mixed_precision=False,
+    pipeline=VanillaPipelineConfig(
+        datamanager=VanillaDataManagerConfig(
+            dataparser=BlenderDataParserConfig(),
+            train_num_rays_per_batch=4096,
+            eval_num_rays_per_batch=4096,
+        ),
+        model=TensoRFModelConfig(),
+    ),
+    optimizers={
+        "fields": {
+            "optimizer": AdamOptimizerConfig(lr=0.001),
+            "scheduler": ExponentialDecaySchedulerConfig(lr_final=0.0001, max_steps=60000),
+        },
+        "encodings": {
+            "optimizer": AdamOptimizerConfig(lr=0.02),
+            "scheduler": ExponentialDecaySchedulerConfig(lr_final=0.002, max_steps=60000),
+        },
+    },
+    # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+    # vis="viewer",
+    steps_per_eval_all_images=60000
+)
+
+method_configs["tensorf-unbounded"] = TrainerConfig(
+    method_name="tensorf-unbounded",
+    steps_per_eval_batch=500,
+    steps_per_save=2000,
+    max_num_iterations=60001,
+    mixed_precision=False,
+    pipeline=VanillaPipelineConfig(
+        datamanager=RandomSubsetDataManagerConfig(
+            dataparser=AdopDataParserConfig(),
+            # dataparser=NerfstudioDataParserConfig(),
+            train_num_rays_per_batch=4096,
+            eval_num_rays_per_batch=4096,
+            # camera_optimizer=CameraOptimizerConfig(
+            #     mode="SO3xR3", optimizer=AdamOptimizerConfig(lr=6e-4, eps=1e-8, weight_decay=1e-2)
+            # ),
+        ),
+        model=TensoRFModelConfig(),
+    ),
+    optimizers={
+        "fields": {
+            "optimizer": AdamOptimizerConfig(lr=0.001),
+            "scheduler": ExponentialDecaySchedulerConfig(lr_final=0.0001, max_steps=60000),
+        },
+        "encodings": {
+            "optimizer": AdamOptimizerConfig(lr=0.02),
+            "scheduler": ExponentialDecaySchedulerConfig(lr_final=0.002, max_steps=60000),
+        },
+    },
+    # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+    # vis="viewer",
+    steps_per_eval_all_images=60000
 )
 
 method_configs["dnerf"] = TrainerConfig(
@@ -822,6 +935,35 @@ method_configs["kplanes"] = TrainerConfig(
     # vis="viewer",
 )
 
+method_configs["kplanes-blender-a"] = TrainerConfig(
+    method_name="kplanes",
+    steps_per_eval_batch=500,
+    steps_per_save=2000,
+    max_num_iterations=30001,
+    steps_per_eval_all_images=30000,
+    mixed_precision=True,
+    pipeline=VanillaPipelineConfig(
+        datamanager=WeightedDataManagerConfig(
+            dataparser=MulticamDataParserConfig(),
+            train_num_rays_per_batch=4096,
+            eval_num_rays_per_batch=4096,
+        ),
+        model=KPlanesModelConfig(eval_num_rays_per_chunk=1 << 15, train_with_random_bg=False),
+    ),
+    optimizers={
+        "proposal_networks": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            "scheduler": CosineDecaySchedulerConfig(warm_up_end=512, max_steps=45000),
+        },
+        "fields": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            "scheduler": CosineDecaySchedulerConfig(warm_up_end=512, max_steps=45000),
+        },
+    },
+    # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+    # vis="viewer",
+)
+
 method_configs["kplanes-dynamic"] = TrainerConfig(
     method_name="kplanes-dynamic",
     steps_per_eval_batch=500,
@@ -831,7 +973,6 @@ method_configs["kplanes-dynamic"] = TrainerConfig(
     pipeline=VanillaPipelineConfig(
         datamanager=VanillaDataManagerConfig(
             dataparser=DNeRFDataParserConfig(),
-
             train_num_rays_per_batch=4096,
             eval_num_rays_per_batch=4096,
         ),
@@ -860,32 +1001,36 @@ method_configs["kplanes-dynamic"] = TrainerConfig(
 )
 
 method_configs["kplanes-unbounded"] = TrainerConfig(
-    method_name="kplanes",
+    method_name="kplanes-unbounded",
     steps_per_eval_batch=500,
     steps_per_save=2000,
-    max_num_iterations=50001,
+    max_num_iterations=45001,
     mixed_precision=True,
     pipeline=VanillaPipelineConfig(
         datamanager=RandomSubsetDataManagerConfig(
             dataparser=AdopDataParserConfig(),
             train_num_rays_per_batch=4096,
-            eval_num_rays_per_batch=2048,
+            eval_num_rays_per_batch=4096,
         ),
         model=KPlanesModelConfig(
             near_plane=0.05,
             far_plane=1000.0,
             is_contracted=True,
-            eval_num_rays_per_chunk=4096
+            multiscale_res=[1, 2, 4, 8],
+            grid_base_resolution=[64, 64, 64],
+            appearance_embedding_dim=32,
+            train_with_random_bg=False,
+            eval_num_rays_per_chunk=1 << 15
         ),
     ),
     optimizers={
         "proposal_networks": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            "scheduler": CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
+            "scheduler": CosineDecaySchedulerConfig(warm_up_end=512, max_steps=45000),
         },
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            "scheduler": CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
+            "scheduler": CosineDecaySchedulerConfig(warm_up_end=512, max_steps=45000),
         },
     },
     # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),

@@ -40,13 +40,15 @@ from nerfstudio.engine.callbacks import (
     TrainingCallbackLocation,
 )
 from nerfstudio.field_components.field_heads import FieldHeadNames
-from nerfstudio.fields.mip_tcnn_field import MipTCNNField, EXPLICIT_LEVEL, interpolation_model
+from nerfstudio.fields.mip_tcnn_field import MipTCNNField, EXPLICIT_LEVEL, interpolation_model, level_features, \
+    auxiliary_info
 from nerfstudio.model_components.ray_samplers import VolumetricSampler
 from nerfstudio.model_components.renderers import (
     AccumulationRenderer,
     DepthRenderer,
     RGBRenderer, SemanticRenderer,
 )
+from nerfstudio.model_components.scene_colliders import AABBBoxCollider
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import colormaps, colors
 from nerfstudio.utils.colors import get_color
@@ -165,15 +167,23 @@ class MipInstantNGPModelConfig(ModelConfig):
     """Base resolution of the hashmap for the base mlp."""
     max_resolution: int = 65536
     """Maximum resolution of the hashmap for the base mlp."""
+    log2_hashmap_size: int = 19
 
-    interpolation_model: Literal["mlp_rgb", "mlp_density", "feature", "ipe", "anneal"] = "ipe"
-    use_frustum_area: bool = False
-    same_color_mlp: bool = True
-    level_window: Optional[int] = None
+    interpolation_model: Literal["mlp_rgb", "mlp_density", "single"] = "mlp_rgb"
+    level_features: Literal["truncate", "anneal", "full"] = "truncate"
+    auxiliary_info: Literal["none", "scale", "cov", "ipe", "ipe_grid"] = "none"
+    num_scales: Optional[int] = None
+    scale_factor: Optional[float] = None
+    separate_encoding: bool = True
+    interpolate_levels: bool = True
+    lod_bias: int = 0
+    train_lod_bias: bool = False
+    freq_dim: int = 4
+    freq_resolution: int = 8192
+    do_residual: bool = False
     training_level_jitter: float = 0
 
-    level_anneal: Optional[int] = None
-    level_anneal_cosine: bool = True
+    grid_loss_mult: float = 0.1
 
     train_with_random_bg: bool = False
     use_sigma_fn: bool = True
@@ -185,7 +195,13 @@ class MipInstantNGPModelConfig(ModelConfig):
 
     depth_lambda: float = 0
     force_weight_1: bool = False
-    finest_occ_grid: bool = True
+    finest_occ_grid: bool = False
+
+    hidden_dim: int = 64
+    """Dimension of hidden layers"""
+    hidden_dim_color: int = 64
+    """Dimension of hidden layers for color network"""
+
 
 class MipNGPModel(Model):
     """Instant NGP model
@@ -199,6 +215,8 @@ class MipNGPModel(Model):
 
     def __init__(self, config: MipInstantNGPModelConfig, metadata: Dict[str, Any], **kwargs) -> None:
         self.cameras = metadata["cameras"]
+        self.near = metadata.get("near", None)
+        self.far = metadata.get("far", None)
 
         super().__init__(config=config, **kwargs)
 
@@ -216,27 +234,39 @@ class MipNGPModel(Model):
 
         self.register_buffer("scene_aabb", self.scene_box.aabb.flatten())
 
-        if self.config.level_anneal == 0:
-            self.config.level_anneal = None
+        if self.config.scale_factor == 0:
+            self.config.scale_factor = None
+
+        if self.config.num_scales == 0:
+            self.config.num_scales = None
 
         self.field = MipTCNNField(
-            aabb=self.scene_box.aabb,
+            self.scene_box.aabb,
             num_images=self.num_train_data,
+            hidden_dim=self.config.hidden_dim,
+            hidden_dim_color=self.config.hidden_dim_color,
             contraction_type=self.config.contraction_type,
             appearance_embedding_dim=self.config.appearance_embedding_dim,
             use_train_appearance_embedding=self.config.use_train_appearance_embedding,
             use_average_appearance_embedding=self.config.use_average_appearance_embedding,
-            features_per_level=self.config.features_per_level,
-            num_levels=self.config.num_levels,
             base_resolution=self.config.base_resolution,
             max_resolution=self.config.max_resolution,
+            features_per_level=self.config.features_per_level,
+            num_levels=self.config.num_levels,
+            log2_hashmap_size=self.config.log2_hashmap_size,
             interpolation_model=interpolation_model(self.config.interpolation_model),
-            use_frustum_area=self.config.use_frustum_area,
-            same_color_mlp=self.config.same_color_mlp,
-            level_window=self.config.level_window,
+            level_features=level_features(self.config.level_features),
+            auxiliary_info=auxiliary_info(self.config.auxiliary_info),
+            num_scales=self.config.num_scales,
+            scale_factor=self.config.scale_factor,
+            separate_encoding=self.config.separate_encoding,
+            interpolate_levels=self.config.interpolate_levels,
             training_level_jitter=self.config.training_level_jitter,
-            level_anneal=self.config.level_anneal,
-            level_anneal_cosine=self.config.level_anneal_cosine,
+            lod_bias=self.config.lod_bias,
+            train_lod_bias=self.config.train_lod_bias,
+            freq_dim=self.config.freq_dim,
+            freq_resolution=self.config.freq_resolution,
+            do_residual=self.config.do_residual,
             cameras=self.cameras,
             finest_occ_grid=self.config.finest_occ_grid,
         )
@@ -248,6 +278,10 @@ class MipNGPModel(Model):
             contraction_type=self.config.contraction_type,
             levels=self.config.grid_levels
         )
+
+        if self.config.contraction_type == ContractionType.AABB:
+            self.collider = AABBBoxCollider(self.scene_box,
+                                            near_plane=self.near if self.near is not None else self.config.near_plane)
 
         # Sampler
         self.sampler = VolumetricSampler(
@@ -297,13 +331,6 @@ class MipNGPModel(Model):
             ),
         ]
 
-        if self.config.level_anneal is not None:
-            callbacks.append(TrainingCallback(
-                where_to_run=[TrainingCallbackLocation.BEFORE_TRAIN_ITERATION],
-                update_every_num_iters=1,
-                func=self.field.anneal_weights,
-            ))
-
         return callbacks
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
@@ -321,19 +348,16 @@ class MipNGPModel(Model):
         }
 
     def get_outputs(self, ray_bundle: RayBundle):
-        with torch.inference_mode(not self.training):
-            outputs = self.get_outputs_inner(ray_bundle)
-            # Last condition is just to only visualize multiple levels on blender for now
-            if not self.training and (not ray_bundle.metadata.get('ignore_levels', False)) \
-                    and self.config.contraction_type == ContractionType.AABB:
-                num_levels = len(self.field.areas)
-                for i in range(num_levels):
-                    if i in self.trained_levels:
-                        level_outputs = self.get_outputs_inner(ray_bundle, i)
-                        outputs[f"rgb_level_{i}"] = level_outputs["rgb"]
-                        outputs[f"depth_level_{i}"] = level_outputs["depth"]
+        outputs = self.get_outputs_inner(ray_bundle)
+        if not self.training and (not ray_bundle.metadata.get('ignore_levels', False)):
+            for i in range(self.field.num_scales):
+                if i in self.trained_levels:
+                    level_outputs = self.get_outputs_inner(ray_bundle, i)
+                    outputs[f"rgb_level_{i}"] = level_outputs["rgb"]
+                    outputs[f"depth_level_{i}"] = level_outputs["depth"]
 
-            return outputs
+        outputs["directions_norm"] = ray_bundle.metadata["directions_norm"]
+        return outputs
 
     def get_outputs_inner(self, ray_bundle: RayBundle, explicit_level: Optional[int] = None):
         assert self.field is not None
@@ -400,7 +424,9 @@ class MipNGPModel(Model):
             #     num_rays=num_rays,
             # )
         elif explicit_level is None:
-            outputs["levels"] = self.renderer_level(weights=weights, semantics=field_outputs[FieldHeadNames.LEVELS],
+            levels = field_outputs[FieldHeadNames.LEVELS]
+            outputs["levels"] = self.renderer_level(weights=weights,
+                                                    semantics=levels.clamp(0, self.field.num_scales - 1),
                                                     ray_indices=ray_indices, num_rays=num_rays)
 
         if explicit_level is None:
@@ -432,10 +458,6 @@ class MipNGPModel(Model):
                 if val > 0:
                     self.trained_levels.add(key)
 
-            # if "weights" in batch:
-            #     for weight in torch.unique(batch["weights"]):
-            #         metrics_dict[f"pixel_area_{weight}"] = outputs["pixel_area"][batch["weights"] == weight].mean()
-
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
@@ -445,7 +467,7 @@ class MipNGPModel(Model):
 
         rgb_loss = self.rgb_loss(image[mask], outputs["rgb"][mask])
         if "weights" in batch:
-            weights = batch["weights"].to(self.device).unsqueeze(-1)
+            weights = batch["weights"].to(self.device).view(-1, 1)
             rgb_loss *= weights[mask]
 
         loss_dict = {"rgb_loss": rgb_loss.mean()}
@@ -456,6 +478,29 @@ class MipNGPModel(Model):
             if "weights" in batch:
                 depth_loss *= weights[mask]
             loss_dict["depth"] = self.config.depth_lambda * depth_loss.mean()
+
+        if self.training:
+            if self.config.grid_loss_mult > 0 and (self.config.level_features.casefold() == "anneal"
+                                                   or (self.config.interpolation_model.casefold() == "single"
+                                                       and self.config.level_features.casefold() == "truncate")):
+                offsets = self.field.table_offsets
+                grid_weight_decay = 0
+                if self.config.separate_encoding:
+                    encodings = self.field.encodings
+                else:
+                    encodings = self.field.encoding
+
+                for encoding in encodings:
+                    for i in range(len(offsets) - 1):
+                        if offsets[i] >= encoding.params.shape[0]:
+                            break
+                        grid_weight_decay += encoding.params[offsets[i]:offsets[i + 1]].square().mean()
+
+                loss_dict["grid_weight_loss"] = self.config.grid_loss_mult * grid_weight_decay
+
+            for key, val in loss_dict.items():
+                if not math.isfinite(val):
+                    raise Exception('Loss is not finite: {}'.format(loss_dict))
 
         return loss_dict
 
@@ -504,6 +549,12 @@ class MipNGPModel(Model):
                     accumulation=outputs["accumulation"],
                 )
 
+        if "mask" in batch:
+            mask = batch["mask"]
+            assert torch.all(mask[:, mask.sum(dim=0) > 0])
+            image = image[:, mask.sum(dim=0).squeeze() > 0]
+            rgb = rgb[:, mask.sum(dim=0).squeeze() > 0]
+
         ssim = self.ssim(image, rgb)
 
         # Switch images from [H, W, C] to [1, C, H, W] for metrics computations
@@ -512,7 +563,6 @@ class MipNGPModel(Model):
 
         psnr = self.psnr(image, rgb)
         lpips = self.lpips(image, rgb)
-
         mse = np.exp(-0.1 * np.log(10.) * float(psnr.item()))
         dssim = np.sqrt((1 - float(ssim)) / 2)
         avg_error = np.exp(np.mean(np.log(np.array([mse, dssim, float(lpips)]))))

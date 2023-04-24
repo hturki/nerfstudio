@@ -43,7 +43,7 @@ class MulticamDataParserConfig(DataParserConfig):
     alpha_color: Optional[str] = "white"
     """alpha color of background"""
 
-    square_bounds: bool = True
+    square_bounds: bool = False
 
 
 @dataclass
@@ -95,7 +95,7 @@ class Multicam(DataParser):
         # in x,y,z order
         camera_to_world[..., 3] *= self.scale_factor
         if "scene_bounds" in base_meta:
-            bounds = torch.FloatTensor(base_meta["scene_bounds"])
+            bounds = torch.FloatTensor(base_meta["scene_bounds"]) * 1.01
             if self.config.square_bounds:
                 radius = bounds.abs().max()
                 bounds = torch.tensor([[-radius, -radius, -radius], [radius, radius, radius]], dtype=torch.float32)
@@ -118,7 +118,7 @@ class Multicam(DataParser):
         )
 
         metadata = {"weights": weights, "cameras": cameras, "near": meta["near"][0], "far": meta["far"][0]}
-        if len(depth_images) > 0:
+        if len(depth_images) > 0 and len(torch.unique(torch.FloatTensor(weights))) == 1:
             metadata["depth_image"] = depth_images
             metadata["pose_scale_factor"] = base_meta["pose_scale_factor"]
 

@@ -53,6 +53,7 @@ from nerfstudio.model_components.renderers import (
 )
 from nerfstudio.model_components.scene_colliders import AABBBoxCollider
 from nerfstudio.models.base_model import Model, ModelConfig
+from nerfstudio.models.mip_instant_ngp import ssim
 from nerfstudio.utils import colormaps, colors, misc
 
 
@@ -231,11 +232,11 @@ class TensoRFModel(Model):
         self.renderer_depth = DepthRenderer()
 
         # losses
-        self.rgb_loss = MSELoss()
+        self.rgb_loss = MSELoss(reduction='none')
 
         # metrics
         self.psnr = PeakSignalNoiseRatio(data_range=1.0)
-        self.ssim = structural_similarity_index_measure
+        self.ssim = ssim #structural_similarity_index_measure
         self.lpips = LearnedPerceptualImagePatchSimilarity(normalize=True)
 
         # colliders
@@ -294,8 +295,11 @@ class TensoRFModel(Model):
         image = batch["image"].to(device)
 
         rgb_loss = self.rgb_loss(image, outputs["rgb"])
+        if "weights" in batch:
+            weights = batch["weights"].to(self.device).view(-1, 1)
+            rgb_loss *= weights
 
-        loss_dict = {"rgb_loss": rgb_loss}
+        loss_dict = {"rgb_loss": rgb_loss.mean()}
         loss_dict = misc.scale_dict(loss_dict, self.config.loss_coefficients)
         return loss_dict
 
@@ -315,18 +319,40 @@ class TensoRFModel(Model):
 
         combined_rgb = torch.cat([image, rgb], dim=1)
 
+        if "mask" in batch:
+            mask = batch["mask"]
+            assert torch.all(mask[:, mask.sum(dim=0) > 0])
+            image = image[:, mask.sum(dim=0).squeeze() > 0]
+            rgb = rgb[:, mask.sum(dim=0).squeeze() > 0]
+
+        ssim = self.ssim(image, rgb)
+
         # Switch images from [H, W, C] to [1, C, H, W] for metrics computations
         image = torch.moveaxis(image, -1, 0)[None, ...]
         rgb = torch.moveaxis(rgb, -1, 0)[None, ...]
 
         psnr = self.psnr(image, rgb)
-        ssim = self.ssim(image, rgb)
         lpips = self.lpips(image, rgb)
+        mse = np.exp(-0.1 * np.log(10.) * float(psnr.item()))
+        dssim = np.sqrt((1 - float(ssim)) / 2)
+        avg_error = np.exp(np.mean(np.log(np.array([mse, dssim, float(lpips)]))))
 
+        # all of these metrics will be logged as scalars
         metrics_dict = {
             "psnr": float(psnr.item()),
-            "ssim": float(ssim.item()),
-            "lpips": float(lpips.item()),
-        }
+            "ssim": float(ssim),
+            "lpips": float(lpips),
+            "avg_error": avg_error
+        }  # type: ignore
+
         images_dict = {"img": combined_rgb, "accumulation": acc, "depth": depth}
+
+        if "weights" in batch:
+            weight = torch.unique(batch["weights"]).item()
+            for key, val in set(metrics_dict.items()):
+                metrics_dict[f"{key}_{weight}"] = val
+            for key, val in set(images_dict.items()):
+                if 'level' not in key:
+                    images_dict[f"{key}_{weight}"] = val
+
         return metrics_dict, images_dict

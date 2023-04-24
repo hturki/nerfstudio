@@ -102,7 +102,7 @@ class MipTCNNField(Field):
         num_layers_color: number of hidden layers for color network
         hidden_dim_color: dimension of hidden layers for color network
         use_appearance_embedding: whether to use appearance embedding
-        num_images: number of images, requried if use_appearance_embedding is True
+        num_images: number of images, required if use_appearance_embedding is True
         appearance_embedding_dim: dimension of appearance embedding
         contraction_type: type of contraction
         num_levels: number of levels of the hashmap for the base mlp
@@ -131,8 +131,9 @@ class MipTCNNField(Field):
             interpolation_model: InterpolationModel = InterpolationModel.MLP_RGB,
             level_features: LevelFeatures = LevelFeatures.TRUNCATE,
             auxiliary_info: AuxiliaryInfo = AuxiliaryInfo.NONE,
-            separate_encodings: Optional[int] = None,
-            separate_encoding_scale: float = 2,
+            num_scales: Optional[int] = None,
+            scale_factor: Optional[float] = None,
+            separate_encoding: bool = True,
             interpolate_levels: bool = True,
             training_level_jitter: float = 0,
             lod_bias: float = 0,
@@ -142,10 +143,12 @@ class MipTCNNField(Field):
             freq_resolution: int = 8192,
             do_residual: bool = False,
             cameras: Cameras = None,
+            debug: bool = False
     ) -> None:
         super().__init__()
         self.register_buffer("aabb", aabb)
         self.cameras = cameras
+        self.debug = debug
 
         self.geo_feat_dim = geo_feat_dim
         self.contraction_type = contraction_type
@@ -187,31 +190,41 @@ class MipTCNNField(Field):
         if self.spatial_distortion is not None:
             area_of_interest *= 2  # Unbounded sphere maps the world from [-1, 1] to [-2, 2]
 
-        self.separate_encodings = separate_encodings
+        per_level_scale = math.exp(math.log(max_resolution / base_resolution) / (num_levels - 1))
+        if scale_factor is None:
+            scale_factor = per_level_scale
 
-        if separate_encodings is not None:
-            per_level_scale = separate_encoding_scale
-        else:
-            per_level_scale = math.exp(math.log(max_resolution / base_resolution) / (num_levels - 1))
+        self.log_scale_factor = math.log(scale_factor)
 
-        self.log_per_level_scale = math.log(per_level_scale)
-        self.base_log = math.log(area_of_interest, per_level_scale) - math.log(base_resolution, per_level_scale)
+        if num_scales is None:
+            num_scales = num_levels
 
-        if separate_encodings is not None:
+        self.num_scales = num_scales
+
+        # Get base log of lowest mip level
+        self.base_log = math.log(area_of_interest, scale_factor) - (
+                math.log(max_resolution, scale_factor) - (num_scales - 1))
+
+        feature_levels = []
+        for cur_level in range(num_levels):
+            feature_levels.append(self.base_log - (math.log(area_of_interest, scale_factor) - math.log(
+                base_resolution * (per_level_scale ** cur_level), scale_factor)))
+
+        CONSOLE.log("Feature levels: {}".format(feature_levels))
+        self.register_buffer('feature_levels', torch.FloatTensor(feature_levels), persistent=False)
+
+        self.separate_encoding = separate_encoding
+        if separate_encoding:
             encodings = []
             self.table_offsets = []
 
-            for i, scale in enumerate(range(separate_encodings - 1, -1, -1)):
-                cur_max_res = max_resolution / (separate_encoding_scale ** scale)
-                if interpolation_model == InterpolationModel.SINGLE and level_features == LevelFeatures.TRUNCATE:
-                    cur_level_scale = math.exp(math.log(cur_max_res / base_resolution) / (num_levels - 1))
+            for scale in range(num_scales):
+                if level_features == LevelFeatures.TRUNCATE:
+                    cur_levels = (self.feature_levels - 1e-8 <= scale).sum().item()
                 else:
-                    cur_level_scale = math.exp(math.log(max_resolution / base_resolution) / (num_levels - 1))
+                    cur_levels = num_levels
 
-                cur_levels = num_levels - (
-                    scale if interpolation_model != InterpolationModel.SINGLE and level_features == LevelFeatures.TRUNCATE else 0)
-
-                encoding = tcnn.Encoding(
+                encodings.append(tcnn.Encoding(
                     n_input_dims=3,
                     encoding_config={
                         "otype": "HashGrid",
@@ -219,32 +232,18 @@ class MipTCNNField(Field):
                         "n_features_per_level": features_per_level,
                         "log2_hashmap_size": log2_hashmap_size,
                         "base_resolution": base_resolution,
-                        "per_level_scale": cur_level_scale,
+                        "per_level_scale": per_level_scale,
                     }
-                )
-                encodings.append(encoding)
-
-                try:
-                    offsets = self._get_encoding_offsets(encoding, cur_level_scale, cur_levels)
-                except:
-                    # Sometimes this changes very slightly
-                    cur_level_scale = encoding.native_tcnn_module.hyperparams()['per_level_scale']
-                    offsets = self._get_encoding_offsets(encoding, cur_level_scale, cur_levels)
-
-                self.table_offsets.append(offsets)
-
-                cur_feature_levels = []
-                for cur_level in range(cur_levels):
-                    cur_feature_levels.append(self.base_log - (math.log(area_of_interest, per_level_scale) - math.log(
-                        base_resolution * (per_level_scale ** cur_level), per_level_scale)))
-                self.register_buffer(f'feature_levels_{i}', torch.FloatTensor(cur_feature_levels), persistent=False)
+                ))
 
             self.encodings = nn.ModuleList(encodings)
-            self.num_scales = separate_encodings
+            try:
+                self.table_offsets = self._get_encoding_offsets(encodings[-1], per_level_scale, num_levels)
+            except:
+                # Sometimes this changes very slightly
+                cur_level_scale = encodings[-1].native_tcnn_module.hyperparams()['per_level_scale']
+                self.table_offsets = self._get_encoding_offsets(encodings[-1], cur_level_scale, num_levels)
         else:
-            self.register_buffer('feature_levels', torch.FloatTensor(range(num_levels)), persistent=False)
-            self.num_scales = num_levels
-
             self.encoding = tcnn.Encoding(
                 n_input_dims=3,
                 encoding_config={
@@ -256,6 +255,7 @@ class MipTCNNField(Field):
                     "per_level_scale": per_level_scale,
                 }
             )
+
             self.table_offsets = self._get_encoding_offsets(self.encoding, per_level_scale, num_levels)
 
         if auxiliary_info == AuxiliaryInfo.NONE:
@@ -303,12 +303,9 @@ class MipTCNNField(Field):
         if interpolation_model != InterpolationModel.SINGLE:
             mlp_bases = []
 
-            for i in range(self.num_scales):
+            for i in range(num_scales):
                 if level_features == LevelFeatures.TRUNCATE:
-                    if self.separate_encodings is not None:
-                        encoding_dims = self.encodings[i].n_output_dims
-                    else:
-                        encoding_dims = (i + 1) * features_per_level
+                    encoding_dims = max((self.feature_levels - 1e-8 <= i).sum() * features_per_level, 0)
                 else:
                     encoding_dims = num_levels * features_per_level
 
@@ -323,6 +320,7 @@ class MipTCNNField(Field):
                         "n_hidden_layers": num_layers - 1,
                     },
                 ))
+
             self.mlp_bases = nn.ModuleList(mlp_bases)
         else:
             self.mlp_base = tcnn.Network(
@@ -339,7 +337,7 @@ class MipTCNNField(Field):
 
         if interpolation_model == InterpolationModel.MLP_RGB:
             mlp_heads = []
-            for i in range(self.num_scales):
+            for i in range(num_scales):
                 mlp_heads.append(tcnn.Network(
                     n_input_dims=self.direction_encoding.n_output_dims + self.geo_feat_dim + self.appearance_embedding_dim,
                     n_output_dims=3,
@@ -380,9 +378,10 @@ class MipTCNNField(Field):
         sample_distances = ((ray_samples.frustums.starts + ray_samples.frustums.ends) / 2)
         pixel_widths = (ray_samples.frustums.pixel_area.sqrt() * sample_distances).view(-1)
         if ray_samples.metadata is not None and EXPLICIT_LEVEL in ray_samples.metadata:
-            pixel_levels = torch.full_like(pixel_widths, ray_samples.metadata[EXPLICIT_LEVEL])
+            level = ray_samples.metadata[EXPLICIT_LEVEL] - (0 if self.interpolate_levels else 1e-5)
+            pixel_levels = torch.full_like(pixel_widths, level)
         else:
-            pixel_levels = self.lod_bias + self.base_log - torch.log(pixel_widths) / self.log_per_level_scale
+            pixel_levels = self.lod_bias + self.base_log - torch.log(pixel_widths) / self.log_scale_factor
         if self.training and self.training_level_jitter > 0:
             # Randomly assign some training pixels to coarser levels
             to_jitter = torch.rand_like(pixel_levels) <= self.training_level_jitter
@@ -400,20 +399,28 @@ class MipTCNNField(Field):
                 level_weights.append(torch.ones_like(li, dtype=pixel_levels.dtype))
         auxiliary_info = self._get_auxiliary_info(ray_samples)
 
-        if self.separate_encodings is None:
+        if not self.separate_encoding:
             encoding = self.encoding(positions_flat)
             encoding = self._anneal_features(encoding, self.feature_levels, pixel_levels)
 
         if self.interpolation_model == InterpolationModel.SINGLE:
-            if self.separate_encodings is not None:
+            if self.separate_encoding:
                 encoding = None
                 for level, (cur_level_indices, cur_level_weights) in enumerate(zip(level_indices, level_weights)):
                     if cur_level_indices.shape[0] > 0:
-                        level_input = positions_flat[cur_level_indices]
-                        level_encoding = self.encodings[level](level_input)
-                        cur_feature_levels = self.get_buffer(f'feature_levels_{level}')
                         cur_pixel_levels = pixel_levels[cur_level_indices]
-                        level_encoding = self._anneal_features(level_encoding, cur_feature_levels, cur_pixel_levels)
+
+                        level_encoding = self.encodings[level](positions_flat[cur_level_indices])
+                        if self.level_features == LevelFeatures.TRUNCATE:
+                            truncated_level_encoding = torch.zeros_like(level_encoding)
+                            # Have to do it this way to avoid gradient issues
+                            for i, feature_level in enumerate(self.feature_levels):
+                                truncated_level_encoding[cur_pixel_levels >= feature_level,
+                                :(i + 1) * self.features_per_level] = level_encoding[cur_pixel_levels >= feature_level,
+                                                                      :(i + 1) * self.features_per_level]
+                            level_encoding = truncated_level_encoding
+
+                        level_encoding = self._anneal_features(level_encoding, self.feature_levels, cur_pixel_levels)
                         if encoding is None:
                             encoding = torch.zeros(positions_flat.shape[0], *level_encoding.shape[1:],
                                                    dtype=level_encoding.dtype, device=level_encoding.device)
@@ -424,7 +431,7 @@ class MipTCNNField(Field):
                     i * self.features_per_level:(i + 1) * self.features_per_level] = 0
 
             if self.auxiliary_info == AuxiliaryInfo.SCALE:
-                auxiliary_info = (pixel_levels.unsqueeze(-1) / (self.num_scales - 1) - 0.5)
+                auxiliary_info = (pixel_levels.unsqueeze(-1) / (self.num_scales - 1) - 0.5).detach()
 
             h = self.mlp_base(torch.cat([encoding, auxiliary_info], -1) if auxiliary_info is not None else encoding)
             density_before_activation, additional_info = torch.split(h, [1, self.geo_feat_dim], dim=-1)
@@ -440,27 +447,26 @@ class MipTCNNField(Field):
         for level, (cur_level_indices, cur_level_weights) in enumerate(zip(level_indices, level_weights)):
             if cur_level_indices.shape[0] > 0:
                 cur_pixel_levels = pixel_levels[cur_level_indices]
-                if self.separate_encodings is None:
+                if not self.separate_encoding:
                     level_encoding = encoding[cur_level_indices]
-                    level_encoding = self._anneal_features(level_encoding, self.feature_levels,
-                                                           cur_pixel_levels)
-                    if self.level_features == LevelFeatures.TRUNCATE:
-                        level_encoding = level_encoding[:, :(level + 1) * self.features_per_level]
                 else:
                     level_encoding = self.encodings[level](positions_flat[cur_level_indices])
-                    level_encoding = self._anneal_features(level_encoding, self.get_buffer(f'feature_levels_{level}'),
-                                                           cur_pixel_levels)
 
+                level_encoding = self._anneal_features(level_encoding, self.feature_levels, cur_pixel_levels)
                 if self.auxiliary_info == AuxiliaryInfo.SCALE:
-                    level_auxiliary_info = (cur_pixel_levels.unsqueeze(-1) - level)
+                    level_auxiliary_info = (cur_pixel_levels.unsqueeze(-1) - level).detach()
                 else:
                     level_auxiliary_info = auxiliary_info[cur_level_indices] if auxiliary_info is not None else None
+
+                if self.level_features == LevelFeatures.TRUNCATE:
+                    level_encoding = level_encoding[:, :self.mlp_bases[level].n_input_dims
+                                                        - (level_auxiliary_info.shape[
+                                                               -1] if level_auxiliary_info is not None else 0)]
 
                 base_input = torch.cat([level_encoding, level_auxiliary_info],
                                        -1) if level_auxiliary_info is not None else level_encoding
 
                 level_h = self.mlp_bases[level](base_input)
-
                 if self.interpolation_model == InterpolationModel.MLP_RGB:
                     density_before_activation, level_mlp_out = torch.split(level_h, [1, self.geo_feat_dim], dim=-1)
                     level_embeddings.append(level_mlp_out)
@@ -473,6 +479,7 @@ class MipTCNNField(Field):
                     if interpolated_h is None:
                         interpolated_h = torch.zeros(positions_flat.shape[0], *level_h.shape[1:],
                                                      dtype=level_h.dtype, device=level_h.device)
+
                     interpolated_h[cur_level_indices] += cur_level_weights.unsqueeze(-1) * level_h
                 else:
                     raise Exception(self.interpolation_model)
@@ -531,8 +538,13 @@ class MipTCNNField(Field):
             else:
                 mlp_head = self.mlp_head
 
-            h = torch.cat([d, density_embedding] + ([embedded_appearance] if self.appearance_embedding_dim > 0 else []),
-                          dim=-1)
+            try:
+                h = torch.cat(
+                    [d, density_embedding] + ([embedded_appearance] if self.appearance_embedding_dim > 0 else []),
+                    dim=-1)
+            except:
+                import pdb;
+                pdb.set_trace()
             outputs[FieldHeadNames.RGB] = mlp_head(h).view(directions.shape).to(directions)
             return outputs
 
@@ -553,7 +565,6 @@ class MipTCNNField(Field):
                 h = torch.cat([d[cur_level_indices], cur_level_embeddings] +
                               ([embedded_appearance[cur_level_indices]]
                                if self.appearance_embedding_dim > 0 else []), dim=-1)
-
                 level_rgbs = self.mlp_heads[i](h)
                 if rgbs is None:
                     rgbs = torch.zeros(*directions.shape, dtype=level_rgbs.dtype,
@@ -687,13 +698,16 @@ class MipTCNNField(Field):
             grid_scale = np.exp2(i * math.log2(per_level_scale)) * self.base_resolution - 1
             resolution = int(math.ceil(grid_scale) + 1)
 
-            params_in_level = resolution ** 3
+            params_in_level = resolution ** encoding.n_input_dims
             params_in_level = int(math.ceil(params_in_level / 8)) * 8
             params_in_level = min(params_in_level, 1 << self.log2_hashmap_size)
+
             total_count += params_in_level
             grid_offsets.append(total_count * self.features_per_level)
 
-        assert total_count * self.features_per_level == encoding.params.shape[0]
+        estimated = total_count * self.features_per_level
+        expected = encoding.params.shape[0]
+        assert estimated == expected, f"{estimated} {expected}"
         return grid_offsets
 
     # def _get_encoding_offsets(self, encoding: nn.Module, per_level_scale: float, num_levels: int) -> List[int]:
