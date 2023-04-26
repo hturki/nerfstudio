@@ -25,6 +25,7 @@ from torchtyping import TensorType
 
 from nerfstudio.cameras.rays import RaySamples
 from nerfstudio.data.scene_box import SceneBox
+from nerfstudio.field_components.activations import trunc_exp
 from nerfstudio.field_components.spatial_distortions import SpatialDistortion
 from nerfstudio.fields.base_field import Field
 
@@ -137,9 +138,9 @@ class HashMLPDensityField(Field):
         # # Rectifying the density with an exponential is much more stable than a ReLU or
         # # softplus, because it enables high post-activation (float32) density outputs
         # # from smaller internal (float16) parameters.
-        # density = trunc_exp(density_before_activation)
+        density = trunc_exp(density_before_activation - 1)
 
-        density = F.softplus(density_before_activation - 1)
+        # density = F.softplus(density_before_activation - 1)
         density = density * selector[..., None]
         return density, None
 

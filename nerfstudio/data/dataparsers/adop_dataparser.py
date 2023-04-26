@@ -191,6 +191,7 @@ class Adop(DataParser):
         metadata = {
             TRAIN_INDICES: embedding_indices[indices],
             WEIGHTS: torch.FloatTensor(weights)[indices],
+            "pose_scale_factor": pose_scale_factor,
             "cameras": cameras,
         }
 

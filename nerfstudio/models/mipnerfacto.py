@@ -67,7 +67,7 @@ class MipNerfactoModelConfig(ModelConfig):
     """Nerfacto Model Config"""
 
     _target: Type = field(default_factory=lambda: MipNerfactoModel)
-    near_plane: float = 0.001
+    near_plane: float = 0.05
     """How far along the ray to start sampling."""
     far_plane: float = 1000.0
     """How far along the ray to stop sampling."""
@@ -85,7 +85,7 @@ class MipNerfactoModelConfig(ModelConfig):
     """Maximum resolution of the hashmap for the base mlp."""
     log2_hashmap_size: int = 19
     """Size of the hashmap for the base mlp"""
-    num_proposal_samples_per_ray: Tuple[int, ...] = (256, 512)
+    num_proposal_samples_per_ray: Tuple[int, ...] = (256, 96)
     """Number of samples per ray for each proposal network."""
     num_nerf_samples_per_ray: int = 48
     """Number of samples per ray for the nerf network."""
@@ -122,11 +122,11 @@ class MipNerfactoModelConfig(ModelConfig):
     disable_scene_contraction: bool = False
     """Whether to disable scene contraction or not."""
 
-    grid_loss_mult: float = 0.1
+    grid_loss_mult: float = 0
 
     interpolation_model: Literal["mlp_rgb", "mlp_density", "single"] = "mlp_rgb"
-    level_features: Literal["truncate", "anneal", "full"] = "truncate"
-    auxiliary_info: Literal["none", "scale", "cov", "ipe", "ipe_grid"] = "none"
+    level_features: Literal["truncate", "anneal", "full"] = "full"
+    auxiliary_info: Literal["none", "scale", "cov", "ipe", "ipe_grid"] = "scale"
     num_scales: Optional[int] = None
     scale_factor: Optional[float] = None
     separate_encoding: bool = True
@@ -147,7 +147,8 @@ class MipNerfactoModelConfig(ModelConfig):
     debug: bool = False
 
     force_weight_1: bool = False
-
+    background_level: bool = False
+    separate_res: bool = True
 
 class MipNerfactoModel(Model):
     config: MipNerfactoModelConfig
@@ -155,14 +156,15 @@ class MipNerfactoModel(Model):
     def __init__(self, config: MipNerfactoModelConfig, metadata: Dict[str, Any], **kwargs) -> None:
         self.near = metadata.get("near", None)
         self.far = metadata.get("far", None)
+        self.pose_scale_factor = metadata.get("pose_scale_factor", 1)
         super().__init__(config=config, **kwargs)
 
     def populate_modules(self):
         """Set the fields and modules."""
         super().populate_modules()
 
-        near = self.near if self.near is not None else self.config.near_plane
-        far = self.far if self.far is not None else self.config.far_plane
+        near = self.near if self.near is not None else (self.config.near_plane / self.pose_scale_factor)
+        far = self.far if self.far is not None else (self.config.far_plane / self.pose_scale_factor)
 
         if self.config.scale_factor == 0:
             self.config.scale_factor = None
@@ -206,7 +208,9 @@ class MipNerfactoModel(Model):
             freq_dim=self.config.freq_dim,
             freq_resolution=self.config.freq_resolution,
             do_residual=self.config.do_residual,
-            debug=self.config.debug
+            debug=self.config.debug,
+            background_level=self.config.background_level,
+            separate_res=self.config.separate_res,
         )
 
         if self.config.use_proposal_network:
@@ -347,7 +351,7 @@ class MipNerfactoModel(Model):
     def get_outputs(self, ray_bundle: RayBundle):
         outputs = self.get_outputs_inner(ray_bundle)
         if not self.training and (not ray_bundle.metadata.get('ignore_levels', False)):
-            for i in range(self.field.num_scales):
+            for i in range(self.field.num_scales + (1 if self.config.background_level else 0)):
                 if i in self.trained_levels:
                     level_outputs = self.get_outputs_inner(ray_bundle, i)
                     outputs[f"rgb_level_{i}"] = level_outputs["rgb"]
@@ -449,20 +453,17 @@ class MipNerfactoModel(Model):
                 loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * metrics_dict["interlevel"]
                 loss_dict["distortion_loss"] = self.config.distortion_loss_mult * metrics_dict["distortion"]
 
-            if self.config.grid_loss_mult > 0 and (self.config.level_features.casefold() == "anneal"
-                                                   or (self.config.interpolation_model.casefold() == "single"
-                                                       and self.config.level_features.casefold() == "truncate")):
-                offsets = self.field.table_offsets
+            if self.config.grid_loss_mult > 0:
                 grid_weight_decay = 0
                 if self.config.separate_encoding:
                     encodings = self.field.encodings
                 else:
                     encodings = [self.field.encoding]
 
-                for encoding in encodings:
+                assert len(encodings) == len(self.field.table_offsets)
+
+                for encoding, offsets in zip(encodings, self.field.table_offsets):
                     for i in range(len(offsets) - 1):
-                        if offsets[i] >= encoding.params.shape[0]:
-                            break
                         grid_weight_decay += encoding.params[offsets[i]:offsets[i + 1]].square().mean()
 
                 loss_dict["grid_weight_loss"] = self.config.grid_loss_mult * grid_weight_decay
