@@ -4,26 +4,24 @@ from functools import cached_property
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Type, Union, Literal
 
-import numpy as np
 import torch
-
-from nerfstudio.utils.comms import get_rank, get_world_size
 from rich.console import Console
 from torch.nn import Parameter
 from torch.utils.data import DistributedSampler, DataLoader
 
 from nerfstudio.cameras.camera_optimizers import CameraOptimizerConfig
 from nerfstudio.cameras.rays import RayBundle
-from nerfstudio.data.datamanagers.base_datamanager import DataManager, DataManagerConfig
+from nerfstudio.data.datamanagers.base_datamanager import DataManager, DataManagerConfig, AnnotatedDataParserUnion
 from nerfstudio.data.datamanagers.image_metadata import ImageMetadata
 from nerfstudio.data.datamanagers.random_subset_dataset import RandomSubsetDataset, RAY_INDEX
 from nerfstudio.data.dataparsers.adop_dataparser import AdopDataParserConfig, TRAIN_INDICES, WEIGHTS
-from nerfstudio.data.dataparsers.base_dataparser import DataparserOutputs, DataParserConfig
+from nerfstudio.data.dataparsers.base_dataparser import DataparserOutputs
 from nerfstudio.data.datasets.base_dataset import InputDataset
 from nerfstudio.data.utils.dataloaders import FixedIndicesEvalDataloader
 from nerfstudio.engine.optimizers import AdamOptimizerConfig
 from nerfstudio.engine.schedulers import ExponentialDecaySchedulerConfig
 from nerfstudio.model_components.ray_generators import RayGenerator
+from nerfstudio.utils.comms import get_rank, get_world_size
 
 CONSOLE = Console(width=120)
 
@@ -37,7 +35,7 @@ class RandomSubsetDataManagerConfig(DataManagerConfig):
 
     _target: Type = field(default_factory=lambda: RandomSubsetDataManager)
     """Target class to instantiate."""
-    dataparser: DataParserConfig = AdopDataParserConfig()
+    dataparser: AnnotatedDataParserUnion = AdopDataParserConfig()
     """Specifies the dataparser used to unpack the data."""
     train_num_rays_per_batch: int = 4096
     """Number of rays per batch to use per training iteration."""

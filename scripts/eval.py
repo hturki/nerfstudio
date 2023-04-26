@@ -29,7 +29,7 @@ class ComputePSNR:
     @torch.inference_mode()
     def main(self) -> None:
         """Main function."""
-        config, pipeline, checkpoint_path = eval_setup(self.load_config)
+        config, pipeline, checkpoint_path, _ = eval_setup(self.load_config)
         assert self.output_path.suffix == ".json"
         metrics_dict = pipeline.get_average_eval_image_metrics()
         self.output_path.parent.mkdir(parents=True, exist_ok=True)

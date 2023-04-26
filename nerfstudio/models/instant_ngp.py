@@ -26,8 +26,8 @@ import nerfacc
 import numpy as np
 import torch
 import torch.nn.functional as F
-from nerfacc import ContractionType
-from torch.nn import Parameter, SmoothL1Loss, HuberLoss
+from torch.nn import HuberLoss
+from torch.nn import Parameter
 from torchmetrics import PeakSignalNoiseRatio
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from typing_extensions import Literal
@@ -39,7 +39,8 @@ from nerfstudio.engine.callbacks import (
     TrainingCallbackLocation,
 )
 from nerfstudio.field_components.field_heads import FieldHeadNames
-from nerfstudio.fields.instant_ngp_field import TCNNInstantNGPField
+from nerfstudio.field_components.spatial_distortions import SceneContraction
+from nerfstudio.fields.nerfacto_field import TCNNNerfactoField
 from nerfstudio.model_components.ray_samplers import VolumetricSampler
 from nerfstudio.model_components.renderers import (
     AccumulationRenderer,
@@ -64,21 +65,19 @@ class InstantNGPModelConfig(ModelConfig):
     """Whether to create a scene collider to filter rays."""
     collider_params: Optional[Dict[str, float]] = None
     """Instant NGP doesn't use a collider."""
-    max_num_samples_per_ray: int = 24
-    """Number of samples in field evaluation."""
     grid_resolution: int = 128
     """Resolution of the grid used for the field."""
+    grid_levels: int = 4
+    """Levels of the grid used for the field."""
     max_res: int = 2048
     """Maximum resolution of the hashmap for the base mlp."""
-    log2_hashmap_size: int = 19
+    log2_hashmap_size: int = 20
     """Size of the hashmap for the base mlp"""
-    contraction_type: ContractionType = ContractionType.UN_BOUNDED_SPHERE
-    """Contraction type used for spatial deformation of the field."""
+    alpha_thre: float = 0.01
+    """Threshold for opacity skipping."""
     cone_angle: float = 0.004
     """Should be set to 0.0 for blender scenes but 1./256 for real scenes."""
-    alpha_thre: float = 1e-2
-    """Alpha threshold for skipping empty space. Should be set to 0 for blender scenes."""
-    render_step_size: float = 0.01
+    render_step_size: Optional[float] = None
     """Minimum step size for rendering."""
     near_plane: float = 0.05
     """How far along ray to start sampling."""
@@ -88,13 +87,14 @@ class InstantNGPModelConfig(ModelConfig):
     """Whether to use an appearance embedding."""
     background_color: Literal["random", "black", "white"] = "random"
     """The color that is given to untrained areas."""
+    max_num_samples_per_ray: int = 1024
 
-    hidden_dim: int = 64
-    hidden_dim_color: int = 64
+    hidden_dim: int = 128
+    hidden_dim_color: int = 128
 
     depth_lambda: float = 0
     num_levels: int = 16
-    features_per_level: int = 8
+    features_per_level: int = 4
 
     train_with_random_bg: bool = False
 
@@ -107,7 +107,7 @@ class NGPModel(Model):
     """
 
     config: InstantNGPModelConfig
-    field: TCNNInstantNGPField
+    field: TCNNNerfactoField
 
     def __init__(self, config: InstantNGPModelConfig, **kwargs) -> None:
         super().__init__(config=config, **kwargs)
@@ -117,17 +117,22 @@ class NGPModel(Model):
         super().populate_modules()
 
         self.config.render_step_size = (
-            (self.scene_box.aabb[1] - self.scene_box.aabb[0]).max()
-            * math.sqrt(3)
-            / self.config.max_num_samples_per_ray
+                (self.scene_box.aabb[1] - self.scene_box.aabb[0]).max()
+                * math.sqrt(3)
+                / self.config.max_num_samples_per_ray
         ).item()
 
         print('Render step size', self.config.render_step_size)
 
-        self.field = TCNNInstantNGPField(
-            aabb=self.scene_box.aabb,
-            contraction_type=self.config.contraction_type,
-            use_appearance_embedding=self.config.use_appearance_embedding,
+        # Occupancy Grid.
+        self.occupancy_grid = nerfacc.OccGridEstimator(
+            roi_aabb=self.scene_box.aabb.flatten(),
+            resolution=self.config.grid_resolution,
+            levels=self.config.grid_levels,
+        )
+
+        self.field = TCNNNerfactoField(
+            aabb=self.occupancy_grid.aabbs[-1].view(2, 3),
             num_images=self.num_train_data,
             log2_hashmap_size=self.config.log2_hashmap_size,
             max_res=self.config.max_res,
@@ -135,21 +140,11 @@ class NGPModel(Model):
             features_per_level=self.config.features_per_level,
             hidden_dim=self.config.hidden_dim,
             hidden_dim_color=self.config.hidden_dim_color,
-        )
-
-        self.scene_aabb = Parameter(self.scene_box.aabb.flatten(), requires_grad=False)
-
-        # Occupancy Grid
-        self.occupancy_grid = nerfacc.OccupancyGrid(
-            roi_aabb=self.scene_aabb,
-            resolution=self.config.grid_resolution,
-            contraction_type=self.config.contraction_type,
+            spatial_distortion=None,
         )
 
         # Sampler
-        vol_sampler_aabb = self.scene_box.aabb if self.config.contraction_type == ContractionType.AABB else None
         self.sampler = VolumetricSampler(
-            scene_aabb=vol_sampler_aabb,
             occupancy_grid=self.occupancy_grid,
             density_fn=self.field.density_fn,
         )
@@ -172,14 +167,12 @@ class NGPModel(Model):
         self.lpips = LearnedPerceptualImagePatchSimilarity(normalize=True)
 
     def get_training_callbacks(
-        self, training_callback_attributes: TrainingCallbackAttributes
+            self, training_callback_attributes: TrainingCallbackAttributes
     ) -> List[TrainingCallback]:
         def update_occupancy_grid(step: int):
-            # TODO: needs to get access to the sampler, on how the step size is determinated at each x. See
-            # https://github.com/KAIR-BAIR/nerfacc/blob/127223b11401125a9fce5ce269bb0546ee4de6e8/examples/train_ngp_nerf.py#L190-L213
-            self.occupancy_grid.every_n_step(
+            self.occupancy_grid.update_every_n_steps(
                 step=step,
-                occ_eval_fn=lambda x: self.field.get_opacity(x, self.config.render_step_size),
+                occ_eval_fn=lambda x: self.field.density_fn(x, None) * self.config.render_step_size,
             )
 
         return [
@@ -205,8 +198,8 @@ class NGPModel(Model):
                 near_plane=self.config.near_plane,
                 far_plane=self.config.far_plane,
                 render_step_size=self.config.render_step_size,
-                cone_angle=self.config.cone_angle,
                 alpha_thre=self.config.alpha_thre,
+                cone_angle=self.config.cone_angle,
             )
 
         field_outputs = self.field(ray_samples)
@@ -214,11 +207,12 @@ class NGPModel(Model):
         # accumulation
         packed_info = nerfacc.pack_info(ray_indices, num_rays)
         weights = nerfacc.render_weight_from_density(
+            t_starts=ray_samples.frustums.starts[..., 0],
+            t_ends=ray_samples.frustums.ends[..., 0],
+            sigmas=field_outputs[FieldHeadNames.DENSITY][..., 0],
             packed_info=packed_info,
-            sigmas=field_outputs[FieldHeadNames.DENSITY],
-            t_starts=ray_samples.frustums.starts,
-            t_ends=ray_samples.frustums.ends,
-        )
+        )[0]
+        weights = weights[..., None]
 
         outputs = {}
         if self.training and self.config.train_with_random_bg:
@@ -240,9 +234,9 @@ class NGPModel(Model):
         )
 
         accumulation = self.renderer_accumulation(weights=weights, ray_indices=ray_indices, num_rays=num_rays)
-        outputs["accumulation"]  = accumulation
-        outputs["alive_ray_mask"]  = accumulation.squeeze(-1) > 0
-        outputs["num_samples_per_ray"]  = packed_info[:, 1]
+        outputs["accumulation"] = accumulation
+        outputs["alive_ray_mask"] = accumulation.squeeze(-1) > 0
+        outputs["num_samples_per_ray"] = packed_info[:, 1]
         outputs["directions_norm"] = ray_bundle.metadata["directions_norm"]
 
         return outputs
@@ -281,7 +275,7 @@ class NGPModel(Model):
         return loss_dict
 
     def get_image_metrics_and_images(
-        self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
+            self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
     ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
         image = self._get_image(batch, outputs)
 
@@ -291,7 +285,6 @@ class NGPModel(Model):
             outputs["depth"],
             accumulation=outputs["accumulation"],
         )
-        alive_ray_mask = colormaps.apply_colormap(outputs["alive_ray_mask"])
 
         combined_rgb = torch.cat([image, rgb], dim=1)
         combined_acc = torch.cat([acc], dim=1)
@@ -304,13 +297,13 @@ class NGPModel(Model):
 
         depth_vis.append(depth)
         combined_depth = torch.cat(depth_vis, dim=1)
-        combined_alive_ray_mask = torch.cat([alive_ray_mask], dim=1)
+        alive_ray_mask = colormaps.apply_colormap(outputs["alive_ray_mask"])
 
         images_dict = {
             "img": combined_rgb,
             "accumulation": combined_acc,
             "depth": combined_depth,
-            "alive_ray_mask": combined_alive_ray_mask,
+            "alive_ray_mask": alive_ray_mask
         }
 
         if "mask" in batch:

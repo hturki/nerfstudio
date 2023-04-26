@@ -24,10 +24,10 @@ import numpy as np
 import tinycudann as tcnn
 import torch
 import torch.nn.functional as F
-from nerfacc import ContractionType, contract
 from nerfstudio.cameras import camera_utils
 
 from nerfstudio.cameras.cameras import Cameras
+from nerfstudio.data.scene_box import SceneBox
 from nerfstudio.field_components.activations import trunc_exp
 
 from nerfstudio.utils.math import expected_sin
@@ -120,7 +120,7 @@ class MipTCNNField(Field):
             num_layers_color: int = 3,
             hidden_dim_color: int = 64,
             spatial_distortion: SpatialDistortion = None,
-            contraction_type: ContractionType = ContractionType.AABB,
+            disable_scene_contraction: bool = False,
             appearance_embedding_dim: int = 32,
             use_train_appearance_embedding: bool = True,
             use_average_appearance_embedding: bool = False,
@@ -154,8 +154,8 @@ class MipTCNNField(Field):
         self.debug = debug
 
         self.geo_feat_dim = geo_feat_dim
-        self.contraction_type = contraction_type
         self.spatial_distortion = spatial_distortion
+        self.disable_scene_contraction = disable_scene_contraction
 
         self.appearance_embedding_dim = appearance_embedding_dim
         if appearance_embedding_dim > 0:
@@ -427,8 +427,8 @@ class MipTCNNField(Field):
             positions = (positions + 2.0) / 4.0
             positions_flat = positions.view(-1, 3)
         else:
+            positions = SceneBox.get_normalized_positions(ray_samples.frustums.get_positions(), self.aabb)
             positions_flat = positions.view(-1, 3)
-            positions_flat = contract(x=positions_flat, roi=self.aabb, type=self.contraction_type)
 
         # Assuming pixels are square
         sample_distances = ((ray_samples.frustums.starts + ray_samples.frustums.ends) / 2)

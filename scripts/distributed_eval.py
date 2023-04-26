@@ -31,7 +31,7 @@ class ComputePSNR:
 
     def main(self) -> None:
         """Main function."""
-        config, pipeline, checkpoint_path = eval_setup(self.load_config)
+        config, pipeline, checkpoint_path, _ = eval_setup(self.load_config)
 
         self.output_path.mkdir(parents=True, exist_ok=True)
         metrics_dict = pipeline.get_average_eval_image_metrics(image_save_dir=self.output_path)

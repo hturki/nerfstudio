@@ -20,8 +20,6 @@ from dataclasses import field
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
-from nerfacc import contract, ContractionType
 from rich.console import Console
 from torch import nn
 from torchtyping import TensorType
@@ -216,16 +214,9 @@ class KPlanesField(Field):
 
         if self.spatial_distortion is not None:
             grid_input = self.spatial_distortion(grid_input)
-            if False:  # or self.use_tcnn:
-                grid_input = (grid_input + 2.0) / 4.0
-            else:
-                grid_input = grid_input / 2  # from [-2, 2] to [-1, 1]
+            grid_input = grid_input / 2  # from [-2, 2] to [-1, 1]
         else:
-            if False:  # or self.use_tcnn:
-                grid_input = contract(x=grid_input, roi=self.aabb, type=ContractionType.AABB)
-            else:
-                # Input should be in [-1, 1]
-                grid_input = (grid_input - self.aabb[0]) * (2.0 / (self.aabb[1] - self.aabb[0])) - 1.0
+            grid_input = (grid_input - self.aabb[0]) * (2.0 / (self.aabb[1] - self.aabb[0])) - 1.0
 
         if len(self.grid_base_resolution) == 4:
             grid_input = torch.cat([grid_input, (2 * ray_samples.times - 1).reshape(-1, 1)], -1)

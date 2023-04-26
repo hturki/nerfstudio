@@ -26,7 +26,6 @@ import nerfacc
 import numpy as np
 import torch
 import torch.nn.functional as F
-from nerfacc import ContractionType
 from rich.console import Console
 from torch.nn import Parameter, SmoothL1Loss
 from torchmetrics import PeakSignalNoiseRatio
@@ -48,7 +47,6 @@ from nerfstudio.model_components.renderers import (
     DepthRenderer,
     RGBRenderer, SemanticRenderer,
 )
-from nerfstudio.model_components.scene_colliders import AABBBoxCollider
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import colormaps, colors
 from nerfstudio.utils.colors import get_color
@@ -147,8 +145,6 @@ class MipInstantNGPModelConfig(ModelConfig):
     """Resolution of the grid used for the field."""
     grid_levels: int = 4
     """Number of grid levels"""
-    contraction_type: ContractionType = ContractionType.UN_BOUNDED_SPHERE
-    """Contraction type used for spatial deformation of the field."""
     cone_angle: float = 0.004
     """Should be set to 0.0 for blender scenes but 1./256 for real scenes."""
     alpha_thre: float = 1e-2
@@ -196,6 +192,9 @@ class MipInstantNGPModelConfig(ModelConfig):
     depth_lambda: float = 0
     force_weight_1: bool = False
     finest_occ_grid: bool = False
+    debug: bool = False
+    background_level: bool = False
+    separate_res: bool = True
 
     hidden_dim: int = 64
     """Dimension of hidden layers"""
@@ -232,20 +231,25 @@ class MipNGPModel(Model):
         """Set the fields and modules."""
         super().populate_modules()
 
-        self.register_buffer("scene_aabb", self.scene_box.aabb.flatten())
-
         if self.config.scale_factor == 0:
             self.config.scale_factor = None
 
         if self.config.num_scales == 0:
             self.config.num_scales = None
 
+        # Occupancy Grid
+        self.occupancy_grid = nerfacc.OccGridEstimator(
+            roi_aabb=self.scene_box.aabb.flatten(),
+            resolution=self.config.grid_resolution,
+            levels=self.config.grid_levels,
+        )
+
         self.field = MipTCNNField(
-            self.scene_box.aabb,
+            self.occupancy_grid.aabbs[-1].view(2, 3),
             num_images=self.num_train_data,
             hidden_dim=self.config.hidden_dim,
             hidden_dim_color=self.config.hidden_dim_color,
-            contraction_type=self.config.contraction_type,
+            disable_scene_contraction=True,
             appearance_embedding_dim=self.config.appearance_embedding_dim,
             use_train_appearance_embedding=self.config.use_train_appearance_embedding,
             use_average_appearance_embedding=self.config.use_average_appearance_embedding,
@@ -269,25 +273,18 @@ class MipNGPModel(Model):
             do_residual=self.config.do_residual,
             cameras=self.cameras,
             finest_occ_grid=self.config.finest_occ_grid,
+            debug=self.config.debug,
+            background_level=self.config.background_level,
+            separate_res=self.config.separate_res
         )
 
-        # Occupancy Grid
-        self.occupancy_grid = nerfacc.OccupancyGrid(
-            roi_aabb=self.scene_aabb,
-            resolution=self.config.grid_resolution,
-            contraction_type=self.config.contraction_type,
-            levels=self.config.grid_levels
-        )
-
-        if self.config.contraction_type == ContractionType.AABB:
-            self.collider = AABBBoxCollider(self.scene_box,
-                                            near_plane=self.near if self.near is not None else self.config.near_plane)
+        # self.collider = AABBBoxCollider(self.occupancy_grid.aabbs[-1],
+        #                                 near_plane=self.near if self.near is not None else self.config.near_plane)
 
         # Sampler
         self.sampler = VolumetricSampler(
-            scene_aabb=self.scene_box.aabb,
             occupancy_grid=self.occupancy_grid,
-            density_fn=self.field.density_fn if self.config.use_sigma_fn else None,
+            density_fn=self.field.density_fn,
         )
 
         # renderers
@@ -299,7 +296,6 @@ class MipNGPModel(Model):
         self.renderer_rgb = RGBRenderer(background_color=background_color)
         self.renderer_accumulation = AccumulationRenderer()
         self.renderer_depth = DepthRenderer(method="expected")
-        # self.renderer_pixel_area = SemanticRenderer()
         self.renderer_level = SemanticRenderer()
 
         # losses
@@ -316,11 +312,9 @@ class MipNGPModel(Model):
             self, training_callback_attributes: TrainingCallbackAttributes
     ) -> List[TrainingCallback]:
         def update_occupancy_grid(step: int):
-            # TODO: needs to get access to the sampler, on how the step size is determinated at each x. See
-            # https://github.com/KAIR-BAIR/nerfacc/blob/127223b11401125a9fce5ce269bb0546ee4de6e8/examples/train_ngp_nerf.py#L190-L213
-            self.occupancy_grid.every_n_step(
+            self.occupancy_grid.update_every_n_steps(
                 step=step,
-                occ_eval_fn=lambda x: self.field.get_opacity(x, self.render_step_size),
+                occ_eval_fn=lambda x: self.field.density_fn(x, None, self.render_step_size) * self.render_step_size,
             )
 
         callbacks = [
@@ -369,8 +363,8 @@ class MipNGPModel(Model):
                 near_plane=self.config.near_plane,
                 far_plane=self.config.far_plane,
                 render_step_size=self.render_step_size,
-                cone_angle=self.config.cone_angle,
                 alpha_thre=self.config.alpha_thre,
+                cone_angle=self.config.cone_angle,
             )
 
         if explicit_level is not None:
@@ -391,10 +385,10 @@ class MipNGPModel(Model):
 
         weights = nerfacc.render_weight_from_density(
             packed_info=packed_info,
-            sigmas=field_outputs[FieldHeadNames.DENSITY],
-            t_starts=ray_samples.frustums.starts,
-            t_ends=ends,
-        )
+            sigmas=field_outputs[FieldHeadNames.DENSITY][..., 0],
+            t_starts=ray_samples.frustums.starts[..., 0],
+            t_ends=ends[..., 0],
+        )[0][..., None]
 
         outputs = {}
         if self.training and self.config.train_with_random_bg:
@@ -417,12 +411,6 @@ class MipNGPModel(Model):
 
         if self.training:
             outputs["level_counts"] = field_outputs[FieldHeadNames.LEVEL_COUNTS]
-            # outputs["pixel_area"] = self.renderer_pixel_area(
-            #     semantics=field_outputs[FieldHeadNames.PIXEL_AREAS],
-            #     weights=weights,
-            #     ray_indices=ray_indices,
-            #     num_rays=num_rays,
-            # )
         elif explicit_level is None:
             levels = field_outputs[FieldHeadNames.LEVELS]
             outputs["levels"] = self.renderer_level(weights=weights,
@@ -480,20 +468,17 @@ class MipNGPModel(Model):
             loss_dict["depth"] = self.config.depth_lambda * depth_loss.mean()
 
         if self.training:
-            if self.config.grid_loss_mult > 0 and (self.config.level_features.casefold() == "anneal"
-                                                   or (self.config.interpolation_model.casefold() == "single"
-                                                       and self.config.level_features.casefold() == "truncate")):
-                offsets = self.field.table_offsets
+            if self.config.grid_loss_mult > 0:
                 grid_weight_decay = 0
                 if self.config.separate_encoding:
                     encodings = self.field.encodings
                 else:
-                    encodings = self.field.encoding
+                    encodings = [self.field.encoding]
 
-                for encoding in encodings:
+                assert len(encodings) == len(self.field.table_offsets)
+
+                for encoding, offsets in zip(encodings, self.field.table_offsets):
                     for i in range(len(offsets) - 1):
-                        if offsets[i] >= encoding.params.shape[0]:
-                            break
                         grid_weight_decay += encoding.params[offsets[i]:offsets[i + 1]].square().mean()
 
                 loss_dict["grid_weight_loss"] = self.config.grid_loss_mult * grid_weight_decay
