@@ -179,7 +179,7 @@ class MipInstantNGPModelConfig(ModelConfig):
     do_residual: bool = False
     training_level_jitter: float = 0
 
-    grid_loss_mult: float = 0.1
+    grid_loss_mult: float = 0
 
     train_with_random_bg: bool = False
     use_sigma_fn: bool = True

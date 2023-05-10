@@ -130,8 +130,8 @@ method_configs["mipnerfacto"] = TrainerConfig(
     method_name="mipnerfacto",
     steps_per_eval_batch=999999999999999,
     steps_per_eval_image=5000,
-    steps_per_save=20000,
-    max_num_iterations=20001,
+    steps_per_save=15000,
+    max_num_iterations=15001,
     mixed_precision=True,
     pipeline=VanillaPipelineConfig(
         datamanager=RandomSubsetDataManagerConfig(
@@ -148,20 +148,20 @@ method_configs["mipnerfacto"] = TrainerConfig(
     optimizers={
         "mlps": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15, weight_decay=1e-8),
-            'scheduler': ExponentialDecaySchedulerConfig(lr_final=5e-4, max_steps=20000),
+            'scheduler': ExponentialDecaySchedulerConfig(lr_final=5e-4, max_steps=15000),
         },
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            'scheduler': ExponentialDecaySchedulerConfig(lr_final=5e-4, max_steps=20000),
+            'scheduler': ExponentialDecaySchedulerConfig(lr_final=5e-4, max_steps=15000),
         },
         "proposal_networks": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            'scheduler': ExponentialDecaySchedulerConfig(lr_final=5e-4, max_steps=20000),
+            'scheduler': ExponentialDecaySchedulerConfig(lr_final=5e-4, max_steps=15000),
         },
     },
     # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
     # vis="viewer",
-    steps_per_eval_all_images=20000
+    steps_per_eval_all_images=15000
 )
 
 method_configs["nerfacto-bounded"] = TrainerConfig(
@@ -203,7 +203,7 @@ method_configs["mipnerfacto-blender-a"] = TrainerConfig(
     method_name="mipnerfacto-blender-a",
     steps_per_eval_batch=999999999999999,
     steps_per_save=20000,
-    max_num_iterations=30001,
+    max_num_iterations=20001,
     mixed_precision=True,
     pipeline=VanillaPipelineConfig(
         datamanager=WeightedDataManagerConfig(dataparser=MulticamDataParserConfig(), train_num_rays_per_batch=8192),
@@ -220,20 +220,20 @@ method_configs["mipnerfacto-blender-a"] = TrainerConfig(
     optimizers={
         "mlps": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15, weight_decay=1e-8),
-            "scheduler": ExponentialDecaySchedulerConfig(lr_final=5e-4, max_steps=30000),
+            "scheduler": ExponentialDecaySchedulerConfig(lr_final=5e-4, max_steps=20000),
         },
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            "scheduler": ExponentialDecaySchedulerConfig(lr_final=5e-4, max_steps=30000),
+            "scheduler": ExponentialDecaySchedulerConfig(lr_final=5e-4, max_steps=20000),
         },
         "proposal_networks": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            "scheduler": ExponentialDecaySchedulerConfig(lr_final=5e-4, max_steps=30000),
+            "scheduler": ExponentialDecaySchedulerConfig(lr_final=5e-4, max_steps=20000),
         },
     },
     # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
     # vis="viewer",
-    steps_per_eval_all_images=30000
+    steps_per_eval_all_images=20000
 )
 
 method_configs["nerfacto-blender-a"] = TrainerConfig(

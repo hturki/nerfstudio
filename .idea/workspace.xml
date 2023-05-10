@@ -6,16 +6,8 @@
   <component name="ChangeListManager">
     <list default="true" id="2ad75bae-f338-46f1-8a62-695b2f4aa7bb" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/nerfstudio/configs/base_config.py" beforeDir="false" afterPath="$PROJECT_DIR$/nerfstudio/configs/base_config.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/nerfstudio/configs/method_configs.py" beforeDir="false" afterPath="$PROJECT_DIR$/nerfstudio/configs/method_configs.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/nerfstudio/data/datamanagers/base_datamanager.py" beforeDir="false" afterPath="$PROJECT_DIR$/nerfstudio/data/datamanagers/base_datamanager.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/nerfstudio/data/datamanagers/random_subset_datamanager.py" beforeDir="false" afterPath="$PROJECT_DIR$/nerfstudio/data/datamanagers/random_subset_datamanager.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/nerfstudio/data/dataparsers/mipnerf_dataparser.py" beforeDir="false" afterPath="$PROJECT_DIR$/nerfstudio/data/dataparsers/mipnerf_dataparser.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/nerfstudio/model_components/ray_samplers.py" beforeDir="false" afterPath="$PROJECT_DIR$/nerfstudio/model_components/ray_samplers.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/nerfstudio/model_components/renderers.py" beforeDir="false" afterPath="$PROJECT_DIR$/nerfstudio/model_components/renderers.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/nerfstudio/models/instant_ngp.py" beforeDir="false" afterPath="$PROJECT_DIR$/nerfstudio/models/instant_ngp.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/nerfstudio/models/mip_instant_ngp.py" beforeDir="false" afterPath="$PROJECT_DIR$/nerfstudio/models/mip_instant_ngp.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/distributed_eval.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/distributed_eval.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -121,7 +113,8 @@
       <workItem from="1681238996785" duration="2286000" />
       <workItem from="1681255772574" duration="2124000" />
       <workItem from="1681267970809" duration="67018000" />
-      <workItem from="1681522876564" duration="236403000" />
+      <workItem from="1681522876564" duration="239530000" />
+      <workItem from="1683209284655" duration="9860000" />
     </task>
     <servers />
   </component>
