@@ -358,9 +358,6 @@ class VanillaPipeline(Pipeline):
             task = progress.add_task("[green]Evaluating all eval images...", total=num_images)
             for camera_ray_bundle, batch in self.datamanager.fixed_indices_eval_dataloader:
                 # time this the following line
-                inner_start = time()
-                height, width = camera_ray_bundle.shape
-                num_rays = height * width
                 camera_ray_bundle.metadata['ignore_levels'] = True
 
                 if hasattr(self.datamanager,
@@ -371,15 +368,22 @@ class VanillaPipeline(Pipeline):
                     weights = self.datamanager.eval_dataparser_outputs.metadata[WEIGHTS].to(camera_ray_bundle.camera_indices.device)
                     batch[WEIGHTS] = weights[camera_ray_bundle.camera_indices]
 
+                height, width = camera_ray_bundle.shape
+                num_rays = height * width
+
+                inner_start = time()
                 outputs = self.model.get_outputs_for_camera_ray_bundle(camera_ray_bundle)
+                render_time = (time() - inner_start)
+
                 metrics_dict, images = self.model.get_image_metrics_and_images(outputs, batch)
                 if image_save_dir is not None:
                     for key, val in images.items():
                         Image.fromarray((val * 255).byte().cpu().numpy()).save(
                             image_save_dir / '{0:06d}-{1}.jpg'.format(int(camera_ray_bundle.camera_indices[0, 0, 0]),
                                                                       key))
+
                 assert "num_rays_per_sec" not in metrics_dict
-                metrics_dict["num_rays_per_sec"] = num_rays / (time() - inner_start)
+                metrics_dict["num_rays_per_sec"] = num_rays / render_time
                 fps_str = "fps"
                 assert fps_str not in metrics_dict
                 metrics_dict[fps_str] = metrics_dict["num_rays_per_sec"] / (height * width)

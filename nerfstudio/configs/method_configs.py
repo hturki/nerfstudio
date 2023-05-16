@@ -143,7 +143,7 @@ method_configs["mipnerfacto"] = TrainerConfig(
             #     mode="SO3xR3", optimizer=AdamOptimizerConfig(lr=6e-4, eps=1e-8, weight_decay=1e-2)
             # ),
         ),
-        model=MipNerfactoModelConfig(eval_num_rays_per_chunk=2048),#1 << 15),
+        model=MipNerfactoModelConfig(eval_num_rays_per_chunk=1 << 18),
     ),
     optimizers={
         "mlps": {
@@ -354,7 +354,7 @@ method_configs["instant-ngp"] = TrainerConfig(
             train_num_rays_per_batch=4096,
             eval_num_rays_per_batch=2048,
         ),
-        model=InstantNGPModelConfig(eval_num_rays_per_chunk=2048),
+        model=InstantNGPModelConfig(eval_num_rays_per_chunk=1 << 15),
     ),
     optimizers={
         "fields": {
@@ -470,7 +470,7 @@ method_configs["mip-instant-ngp-bounded"] = TrainerConfig(
     pipeline=DynamicBatchPipelineConfig(
         datamanager=WeightedDataManagerConfig(dataparser=MulticamDataParserConfig(), train_num_rays_per_batch=8192),
         model=MipInstantNGPModelConfig(
-            eval_num_rays_per_chunk=1024,
+            eval_num_rays_per_chunk=8192,
             max_num_samples_per_ray=1024,
             near_plane=0,
             far_plane=None,
@@ -1005,7 +1005,7 @@ method_configs["kplanes-unbounded"] = TrainerConfig(
             grid_base_resolution=[64, 64, 64],
             appearance_embedding_dim=32,
             train_with_random_bg=False,
-            eval_num_rays_per_chunk=2048
+            eval_num_rays_per_chunk=1 << 15
         ),
     ),
     optimizers={

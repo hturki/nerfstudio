@@ -22,6 +22,7 @@ import numpy as np
 import torch
 
 from nerfstudio.fields.mip_tcnn_field import P
+from nerfstudio.utils import profiler
 from nerfstudio.utils.math import expected_sin
 from torch import nn
 from torch.nn.parameter import Parameter
@@ -247,6 +248,7 @@ class TCNNNerfactoField(Field):
             },
         )
 
+    @profiler.time_function
     def get_density(self, ray_samples: RaySamples) -> Tuple[TensorType, TensorType]:
         """Computes and returns the densities."""
         if self.spatial_distortion is not None:
@@ -289,6 +291,7 @@ class TCNNNerfactoField(Field):
         density = density * selector[..., None]
         return density, base_mlp_out
 
+    @profiler.time_function
     def get_outputs(
             self, ray_samples: RaySamples, density_embedding: Optional[TensorType] = None
     ) -> Dict[FieldHeadNames, TensorType]:

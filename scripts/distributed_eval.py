@@ -13,6 +13,8 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 import tyro
+
+from nerfstudio.utils import profiler
 from nerfstudio.utils.comms import get_world_size, get_rank, is_main_process
 from nerfstudio.utils.eval_utils import eval_setup
 from rich.console import Console
@@ -34,6 +36,9 @@ class ComputePSNR:
         config, pipeline, checkpoint_path, _ = eval_setup(self.load_config)
 
         self.output_path.mkdir(parents=True, exist_ok=True)
+        writer_log_path = self.output_path / 'log.txt'
+        profiler.setup_profiler(config.logging, writer_log_path)
+
         metrics_dict = pipeline.get_average_eval_image_metrics(image_save_dir=self.output_path)
 
         output_json_path = self.output_path / 'metrics.json'
@@ -71,6 +76,7 @@ class ComputePSNR:
             output_json_path.write_text(json.dumps(benchmark_info, indent=2), "utf8")
 
             CONSOLE.print(f"Saved results to: {self.output_path}")
+            profiler.flush_profiler(config.logging)
         else:
             shard_output_path = Path(str(output_json_path) + f'.{get_rank()}.tmp')
             # Get the output and define the names to save to

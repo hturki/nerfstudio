@@ -41,6 +41,7 @@ from nerfstudio.field_components.spatial_distortions import SceneContraction
 from nerfstudio.fields.density_fields import HashMLPDensityField
 from nerfstudio.fields.mip_tcnn_field import MipTCNNField, EXPLICIT_LEVEL, interpolation_model, level_features, \
     auxiliary_info
+from nerfstudio.fields.ss_tcnn_field import SSTCNNField
 from nerfstudio.model_components.losses import (
     MSELoss,
     distortion_loss,
@@ -150,6 +151,10 @@ class MipNerfactoModelConfig(ModelConfig):
     background_level: bool = False
     separate_res: bool = True
 
+    super_sample: Optional[int] = None
+
+    use_3d_volume: bool = False
+
 class MipNerfactoModel(Model):
     config: MipNerfactoModelConfig
 
@@ -180,38 +185,57 @@ class MipNerfactoModel(Model):
             # Collider
             self.collider = NearFarCollider(near_plane=near, far_plane=far)
 
-        # Fields
-        self.field = MipTCNNField(
-            self.scene_box.aabb,
-            num_images=self.num_train_data,
-            hidden_dim=self.config.hidden_dim,
-            hidden_dim_color=self.config.hidden_dim_color,
-            spatial_distortion=scene_contraction,
-            appearance_embedding_dim=self.config.appearance_embedding_dim,
-            use_train_appearance_embedding=self.config.use_train_appearance_embedding,
-            use_average_appearance_embedding=self.config.use_average_appearance_embedding,
-            base_resolution=self.config.base_resolution,
-            max_resolution=self.config.max_resolution,
-            features_per_level=self.config.features_per_level,
-            num_levels=self.config.num_levels,
-            log2_hashmap_size=self.config.log2_hashmap_size,
-            interpolation_model=interpolation_model(self.config.interpolation_model),
-            level_features=level_features(self.config.level_features),
-            auxiliary_info=auxiliary_info(self.config.auxiliary_info),
-            num_scales=self.config.num_scales,
-            scale_factor=self.config.scale_factor,
-            separate_encoding=self.config.separate_encoding,
-            interpolate_levels=self.config.interpolate_levels,
-            training_level_jitter=self.config.training_level_jitter,
-            lod_bias=self.config.lod_bias,
-            train_lod_bias=self.config.train_lod_bias,
-            freq_dim=self.config.freq_dim,
-            freq_resolution=self.config.freq_resolution,
-            do_residual=self.config.do_residual,
-            debug=self.config.debug,
-            background_level=self.config.background_level,
-            separate_res=self.config.separate_res,
-        )
+        if self.config.super_sample is not None:
+            self.field = SSTCNNField(
+                self.scene_box.aabb,
+                num_images=self.num_train_data,
+                hidden_dim=self.config.hidden_dim,
+                hidden_dim_color=self.config.hidden_dim_color,
+                spatial_distortion=scene_contraction,
+                appearance_embedding_dim=self.config.appearance_embedding_dim,
+                use_train_appearance_embedding=self.config.use_train_appearance_embedding,
+                use_average_appearance_embedding=self.config.use_average_appearance_embedding,
+                base_resolution=self.config.base_resolution,
+                max_resolution=self.config.max_resolution,
+                features_per_level=self.config.features_per_level,
+                num_levels=self.config.num_levels,
+                log2_hashmap_size=self.config.log2_hashmap_size,
+                samples=self.config.super_sample,
+            )
+        else:
+            # Fields
+            self.field = MipTCNNField(
+                self.scene_box.aabb,
+                num_images=self.num_train_data,
+                hidden_dim=self.config.hidden_dim,
+                hidden_dim_color=self.config.hidden_dim_color,
+                spatial_distortion=scene_contraction,
+                appearance_embedding_dim=self.config.appearance_embedding_dim,
+                use_train_appearance_embedding=self.config.use_train_appearance_embedding,
+                use_average_appearance_embedding=self.config.use_average_appearance_embedding,
+                base_resolution=self.config.base_resolution,
+                max_resolution=self.config.max_resolution,
+                features_per_level=self.config.features_per_level,
+                num_levels=self.config.num_levels,
+                log2_hashmap_size=self.config.log2_hashmap_size,
+                interpolation_model=interpolation_model(self.config.interpolation_model),
+                level_features=level_features(self.config.level_features),
+                auxiliary_info=auxiliary_info(self.config.auxiliary_info),
+                num_scales=self.config.num_scales,
+                scale_factor=self.config.scale_factor,
+                separate_encoding=self.config.separate_encoding,
+                interpolate_levels=self.config.interpolate_levels,
+                training_level_jitter=self.config.training_level_jitter,
+                lod_bias=self.config.lod_bias,
+                train_lod_bias=self.config.train_lod_bias,
+                freq_dim=self.config.freq_dim,
+                freq_resolution=self.config.freq_resolution,
+                do_residual=self.config.do_residual,
+                debug=self.config.debug,
+                background_level=self.config.background_level,
+                separate_res=self.config.separate_res,
+                use_3d_volume=self.config.use_3d_volume,
+            )
 
         if self.config.use_proposal_network:
             self.density_fns = []
@@ -225,7 +249,7 @@ class MipNerfactoModel(Model):
             for i in range(num_prop_nets):
                 proposal_net_args_list.append({
                     "hidden_dim": 16,
-                    "log2_hashmap_size": 19, #self.config.log2_hashmap_size,
+                    "log2_hashmap_size": 19,  # self.config.log2_hashmap_size,
                     "num_levels": levels[i],
                     "base_res": self.config.base_resolution,
                     "max_res": max_res[i],
@@ -349,8 +373,9 @@ class MipNerfactoModel(Model):
         return callbacks
 
     def get_outputs(self, ray_bundle: RayBundle):
-        outputs = self.get_outputs_inner(ray_bundle)
-        if not self.training and (not ray_bundle.metadata.get('ignore_levels', False)):
+        ignore_levels = ray_bundle.metadata.get('ignore_levels', False)
+        outputs = self.get_outputs_inner(ray_bundle, None, ignore_levels)
+        if not self.training and (not ignore_levels) and self.config.super_sample is None:
             for i in range(self.field.num_scales + (1 if self.config.background_level else 0)):
                 if i in self.trained_levels:
                     level_outputs = self.get_outputs_inner(ray_bundle, i)
@@ -360,7 +385,7 @@ class MipNerfactoModel(Model):
         outputs["directions_norm"] = ray_bundle.metadata["directions_norm"]
         return outputs
 
-    def get_outputs_inner(self, ray_bundle: RayBundle, explicit_level: Optional[int] = None):
+    def get_outputs_inner(self, ray_bundle: RayBundle, explicit_level: Optional[int] = None, time_render: bool = False):
         if self.config.use_proposal_network:
             ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle,
                                                                                 density_fns=self.density_fns)
@@ -376,9 +401,26 @@ class MipNerfactoModel(Model):
             ray_samples.metadata[EXPLICIT_LEVEL] = explicit_level
 
         field_outputs = self.field(ray_samples)
+        if not self.training and self.config.use_3d_volume:
+            for k, v in field_outputs.items():
+                if isinstance(v, torch.Tensor):
+                    field_outputs[k] = torch.nan_to_num(v)
+
         weights = ray_samples.get_weights(field_outputs[FieldHeadNames.DENSITY])
 
         outputs = {}
+
+        if self.training and self.config.train_with_random_bg:
+            background = torch.rand_like(ray_bundle.origins)
+            outputs["bg_color"] = background
+        else:
+            background = None
+
+        outputs["rgb"] = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights,
+                                           background=background)
+
+        if time_render:
+            return outputs
 
         if self.config.use_proposal_network:
             weights_list.append(weights)
@@ -393,23 +435,15 @@ class MipNerfactoModel(Model):
                 outputs["weights_list"] = weights_list
                 outputs["ray_samples_list"] = ray_samples_list
 
-        if self.training and self.config.train_with_random_bg:
-            background = torch.rand_like(ray_bundle.origins)
-            outputs["bg_color"] = background
-        else:
-            background = None
-
-        outputs["rgb"] = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights,
-                                           background=background)
         outputs["depth"] = self.renderer_depth(weights=weights, ray_samples=ray_samples)
 
         if explicit_level is None:
             outputs["accumulation"] = self.renderer_accumulation(weights=weights)
 
             # These use a lot of GPU memory, so we avoid storing them for eval.
-            if self.training:
+            if self.training and self.config.super_sample is None:
                 outputs["level_counts"] = field_outputs[FieldHeadNames.LEVEL_COUNTS]
-            else:
+            elif self.config.super_sample is None:
                 levels = field_outputs[FieldHeadNames.LEVELS]
                 outputs["levels"] = self.renderer_level(weights=weights,
                                                         semantics=levels.clamp(0, self.field.num_scales - 1))
@@ -429,10 +463,11 @@ class MipNerfactoModel(Model):
                 metrics_dict["distortion"] = distortion_loss(outputs["weights_list"], outputs["ray_samples_list"])
                 metrics_dict["interlevel"] = interlevel_loss(outputs["weights_list"], outputs["ray_samples_list"])
 
-            for key, val in outputs["level_counts"].items():
-                metrics_dict[f"level_counts_{key}"] = val
-                if val > 0:
-                    self.trained_levels.add(key)
+            if self.config.super_sample is None:
+                for key, val in outputs["level_counts"].items():
+                    metrics_dict[f"level_counts_{key}"] = val
+                    if val > 0:
+                        self.trained_levels.add(key)
 
             if self.config.train_lod_bias:
                 metrics_dict["lod_bias"] = self.field.lod_bias
@@ -479,35 +514,52 @@ class MipNerfactoModel(Model):
     ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
         image = self._get_image(batch, outputs)
         rgb = outputs["rgb"]
-        acc = colormaps.apply_colormap(outputs["accumulation"])
-        depth = colormaps.apply_depth_colormap(
-            outputs["depth"],
-            accumulation=outputs["accumulation"],
-        )
 
         combined_rgb = torch.cat([image, rgb], dim=1)
-        combined_acc = torch.cat([acc], dim=1)
-        depth_vis = []
-        if "depth_image" in batch:
-            depth_vis.append(colormaps.apply_depth_colormap(
-                batch["depth_image"] * outputs["directions_norm"],
-            ))
 
-        depth_vis.append(depth)
-        combined_depth = torch.cat(depth_vis, dim=1)
+        images_dict = {
+            "img": combined_rgb,
+        }
 
-        images_dict = {"img": combined_rgb, "accumulation": combined_acc, "depth": combined_depth}
+        if "accumulation" in outputs:
+            acc = colormaps.apply_colormap(outputs["accumulation"])
+            depth = colormaps.apply_depth_colormap(
+                outputs["depth"],
+                accumulation=outputs["accumulation"],
+            )
 
-        if not self.training:
-            images_dict["levels"] = colormaps.apply_colormap(outputs["levels"] / self.config.num_levels, cmap="turbo")
+            combined_acc = torch.cat([acc], dim=1)
+            depth_vis = []
+            if "depth_image" in batch:
+                depth_vis.append(colormaps.apply_depth_colormap(
+                    batch["depth_image"] * outputs["directions_norm"],
+                ))
 
-        for i in range(self.config.num_levels):
-            if f"rgb_level_{i}" in outputs:
-                images_dict[f"rgb_level_{i}"] = torch.cat([image, outputs[f"rgb_level_{i}"]], dim=1)
-                images_dict[f"depth_level_{i}"] = colormaps.apply_depth_colormap(
-                    outputs[f"depth_level_{i}"],
-                    accumulation=outputs["accumulation"],
-                )
+            depth_vis.append(depth)
+            combined_depth = torch.cat(depth_vis, dim=1)
+
+            images_dict["accumulation"] = combined_acc
+            images_dict["depth"] = combined_depth
+
+            if not self.training and (self.config.super_sample is None):
+                images_dict["levels"] = colormaps.apply_colormap(outputs["levels"] / self.config.num_levels, cmap="turbo")
+
+            for i in range(self.config.num_levels):
+                if f"rgb_level_{i}" in outputs:
+                    images_dict[f"rgb_level_{i}"] = torch.cat([image, outputs[f"rgb_level_{i}"]], dim=1)
+                    images_dict[f"depth_level_{i}"] = colormaps.apply_depth_colormap(
+                        outputs[f"depth_level_{i}"],
+                        accumulation=outputs["accumulation"],
+                    )
+
+            if self.config.use_proposal_network:
+                for i in range(self.config.num_proposal_iterations):
+                    key = f"prop_depth_{i}"
+                    prop_depth_i = colormaps.apply_depth_colormap(
+                        outputs[key],
+                        accumulation=outputs["accumulation"],
+                    )
+                    images_dict[key] = prop_depth_i
 
         if "mask" in batch:
             mask = batch["mask"]
@@ -542,15 +594,6 @@ class MipNerfactoModel(Model):
             for key, val in set(images_dict.items()):
                 if 'level' not in key:
                     images_dict[f"{key}_{weight}"] = val
-
-        if self.config.use_proposal_network:
-            for i in range(self.config.num_proposal_iterations):
-                key = f"prop_depth_{i}"
-                prop_depth_i = colormaps.apply_depth_colormap(
-                    outputs[key],
-                    accumulation=outputs["accumulation"],
-                )
-                images_dict[key] = prop_depth_i
 
         return metrics_dict, images_dict
 

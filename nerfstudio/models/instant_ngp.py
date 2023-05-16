@@ -49,7 +49,7 @@ from nerfstudio.model_components.renderers import (
 )
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.models.mip_instant_ngp import ssim
-from nerfstudio.utils import colormaps, colors
+from nerfstudio.utils import colormaps, colors, profiler
 from nerfstudio.utils.colors import get_color
 
 
@@ -141,6 +141,7 @@ class NGPModel(Model):
             hidden_dim=self.config.hidden_dim,
             hidden_dim_color=self.config.hidden_dim_color,
             spatial_distortion=None,
+            appearance_embedding_dim=32 if self.config.use_appearance_embedding else 0,
         )
 
         # Sampler
@@ -187,7 +188,7 @@ class NGPModel(Model):
         return {
             'fields': list(self.field.parameters()),
         }
-
+    @profiler.time_function
     def get_outputs(self, ray_bundle: RayBundle):
         assert self.field is not None
         num_rays = len(ray_bundle)

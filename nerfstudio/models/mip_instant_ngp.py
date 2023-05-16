@@ -19,6 +19,7 @@ Implementation of Instant NGP.
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Type, Any
 
@@ -41,6 +42,7 @@ from nerfstudio.engine.callbacks import (
 from nerfstudio.field_components.field_heads import FieldHeadNames
 from nerfstudio.fields.mip_tcnn_field import MipTCNNField, EXPLICIT_LEVEL, interpolation_model, level_features, \
     auxiliary_info
+from nerfstudio.fields.ss_tcnn_field import SSTCNNField
 from nerfstudio.model_components.ray_samplers import VolumetricSampler
 from nerfstudio.model_components.renderers import (
     AccumulationRenderer,
@@ -48,7 +50,7 @@ from nerfstudio.model_components.renderers import (
     RGBRenderer, SemanticRenderer,
 )
 from nerfstudio.models.base_model import Model, ModelConfig
-from nerfstudio.utils import colormaps, colors
+from nerfstudio.utils import colormaps, colors, profiler
 from nerfstudio.utils.colors import get_color
 
 CONSOLE = Console(width=120)
@@ -200,7 +202,9 @@ class MipInstantNGPModelConfig(ModelConfig):
     """Dimension of hidden layers"""
     hidden_dim_color: int = 64
     """Dimension of hidden layers for color network"""
+    super_sample: Optional[int] = None
 
+    use_3d_volume: bool = False
 
 class MipNGPModel(Model):
     """Instant NGP model
@@ -210,7 +214,6 @@ class MipNGPModel(Model):
     """
 
     config: MipInstantNGPModelConfig
-    field: MipTCNNField
 
     def __init__(self, config: MipInstantNGPModelConfig, metadata: Dict[str, Any], **kwargs) -> None:
         self.cameras = metadata["cameras"]
@@ -244,39 +247,57 @@ class MipNGPModel(Model):
             levels=self.config.grid_levels,
         )
 
-        self.field = MipTCNNField(
-            self.occupancy_grid.aabbs[-1].view(2, 3),
-            num_images=self.num_train_data,
-            hidden_dim=self.config.hidden_dim,
-            hidden_dim_color=self.config.hidden_dim_color,
-            disable_scene_contraction=True,
-            appearance_embedding_dim=self.config.appearance_embedding_dim,
-            use_train_appearance_embedding=self.config.use_train_appearance_embedding,
-            use_average_appearance_embedding=self.config.use_average_appearance_embedding,
-            base_resolution=self.config.base_resolution,
-            max_resolution=self.config.max_resolution,
-            features_per_level=self.config.features_per_level,
-            num_levels=self.config.num_levels,
-            log2_hashmap_size=self.config.log2_hashmap_size,
-            interpolation_model=interpolation_model(self.config.interpolation_model),
-            level_features=level_features(self.config.level_features),
-            auxiliary_info=auxiliary_info(self.config.auxiliary_info),
-            num_scales=self.config.num_scales,
-            scale_factor=self.config.scale_factor,
-            separate_encoding=self.config.separate_encoding,
-            interpolate_levels=self.config.interpolate_levels,
-            training_level_jitter=self.config.training_level_jitter,
-            lod_bias=self.config.lod_bias,
-            train_lod_bias=self.config.train_lod_bias,
-            freq_dim=self.config.freq_dim,
-            freq_resolution=self.config.freq_resolution,
-            do_residual=self.config.do_residual,
-            cameras=self.cameras,
-            finest_occ_grid=self.config.finest_occ_grid,
-            debug=self.config.debug,
-            background_level=self.config.background_level,
-            separate_res=self.config.separate_res
-        )
+        if self.config.super_sample is not None:
+            self.field = SSTCNNField(
+                self.occupancy_grid.aabbs[-1].view(2, 3),
+                num_images=self.num_train_data,
+                hidden_dim=self.config.hidden_dim,
+                hidden_dim_color=self.config.hidden_dim_color,
+                disable_scene_contraction=True,
+                appearance_embedding_dim=self.config.appearance_embedding_dim,
+                use_train_appearance_embedding=self.config.use_train_appearance_embedding,
+                use_average_appearance_embedding=self.config.use_average_appearance_embedding,
+                max_resolution=self.config.max_resolution,
+                features_per_level=self.config.features_per_level,
+                num_levels=self.config.num_levels,
+                log2_hashmap_size=self.config.log2_hashmap_size,
+                samples=self.config.super_sample,
+            )
+        else:
+            self.field = MipTCNNField(
+                self.occupancy_grid.aabbs[-1].view(2, 3),
+                num_images=self.num_train_data,
+                hidden_dim=self.config.hidden_dim,
+                hidden_dim_color=self.config.hidden_dim_color,
+                disable_scene_contraction=True,
+                appearance_embedding_dim=self.config.appearance_embedding_dim,
+                use_train_appearance_embedding=self.config.use_train_appearance_embedding,
+                use_average_appearance_embedding=self.config.use_average_appearance_embedding,
+                base_resolution=self.config.base_resolution,
+                max_resolution=self.config.max_resolution,
+                features_per_level=self.config.features_per_level,
+                num_levels=self.config.num_levels,
+                log2_hashmap_size=self.config.log2_hashmap_size,
+                interpolation_model=interpolation_model(self.config.interpolation_model),
+                level_features=level_features(self.config.level_features),
+                auxiliary_info=auxiliary_info(self.config.auxiliary_info),
+                num_scales=self.config.num_scales,
+                scale_factor=self.config.scale_factor,
+                separate_encoding=self.config.separate_encoding,
+                interpolate_levels=self.config.interpolate_levels,
+                training_level_jitter=self.config.training_level_jitter,
+                lod_bias=self.config.lod_bias,
+                train_lod_bias=self.config.train_lod_bias,
+                freq_dim=self.config.freq_dim,
+                freq_resolution=self.config.freq_resolution,
+                do_residual=self.config.do_residual,
+                cameras=self.cameras,
+                finest_occ_grid=self.config.finest_occ_grid,
+                debug=self.config.debug,
+                background_level=self.config.background_level,
+                separate_res=self.config.separate_res,
+                use_3d_volume=self.config.use_3d_volume
+            )
 
         # self.collider = AABBBoxCollider(self.occupancy_grid.aabbs[-1],
         #                                 near_plane=self.near if self.near is not None else self.config.near_plane)
@@ -307,6 +328,7 @@ class MipNGPModel(Model):
         self.lpips = LearnedPerceptualImagePatchSimilarity()
 
         self.trained_levels = set()
+        self.timing_start = None
 
     def get_training_callbacks(
             self, training_callback_attributes: TrainingCallbackAttributes
@@ -341,9 +363,11 @@ class MipNGPModel(Model):
             'fields': fields,
         }
 
+    @profiler.time_function
     def get_outputs(self, ray_bundle: RayBundle):
-        outputs = self.get_outputs_inner(ray_bundle)
-        if not self.training and (not ray_bundle.metadata.get('ignore_levels', False)):
+        ignore_levels = ray_bundle.metadata.get('ignore_levels', False)
+        outputs = self.get_outputs_inner(ray_bundle, None, ignore_levels)
+        if not self.training and (not ignore_levels) and self.config.super_sample is None:
             for i in range(self.field.num_scales):
                 if i in self.trained_levels:
                     level_outputs = self.get_outputs_inner(ray_bundle, i)
@@ -353,7 +377,9 @@ class MipNGPModel(Model):
         outputs["directions_norm"] = ray_bundle.metadata["directions_norm"]
         return outputs
 
-    def get_outputs_inner(self, ray_bundle: RayBundle, explicit_level: Optional[int] = None):
+    @profiler.time_function
+    def get_outputs_inner(self, ray_bundle: RayBundle, explicit_level: Optional[int] = None,
+                          time_render: bool = False):
         assert self.field is not None
         num_rays = len(ray_bundle)
 
@@ -373,6 +399,10 @@ class MipNGPModel(Model):
             ray_samples.metadata[EXPLICIT_LEVEL] = explicit_level
 
         field_outputs = self.field(ray_samples)
+        if not self.training and self.config.use_3d_volume:
+            for k, v in field_outputs.items():
+                if isinstance(v, torch.Tensor):
+                    field_outputs[k] = torch.nan_to_num(v)
 
         # accumulation
         packed_info = nerfacc.pack_info(ray_indices, num_rays)
@@ -405,13 +435,16 @@ class MipNGPModel(Model):
             background=background
         )
 
+        if time_render:
+            return outputs
+
         outputs["depth"] = self.renderer_depth(
             weights=weights, ray_samples=ray_samples, ray_indices=ray_indices, num_rays=num_rays
         )
 
-        if self.training:
+        if self.training and "level_counts" in outputs:
             outputs["level_counts"] = field_outputs[FieldHeadNames.LEVEL_COUNTS]
-        elif explicit_level is None:
+        elif explicit_level is None and "levels" in outputs:
             levels = field_outputs[FieldHeadNames.LEVELS]
             outputs["levels"] = self.renderer_level(weights=weights,
                                                     semantics=levels.clamp(0, self.field.num_scales - 1),
@@ -440,7 +473,7 @@ class MipNGPModel(Model):
         metrics_dict["psnr"] = self.psnr(rgb[mask], image[mask])
         metrics_dict["num_samples_per_batch"] = outputs["num_samples_per_ray"].sum()
 
-        if self.training:
+        if self.training and "level_counts" in outputs:
             for key, val in outputs["level_counts"].items():
                 metrics_dict[f"level_counts_{key}"] = val
                 if val > 0:
@@ -495,44 +528,46 @@ class MipNGPModel(Model):
         image = self._get_image(batch, outputs)
 
         rgb = outputs["rgb"]
-        acc = colormaps.apply_colormap(outputs["accumulation"])
-        depth = colormaps.apply_depth_colormap(
-            outputs["depth"],
-            accumulation=outputs["accumulation"],
-        )
-        alive_ray_mask = colormaps.apply_colormap(outputs["alive_ray_mask"])
-
         combined_rgb = torch.cat([image, rgb], dim=1)
-        combined_acc = torch.cat([acc], dim=1)
-
-        depth_vis = []
-        if "depth_image" in batch:
-            depth_vis.append(colormaps.apply_depth_colormap(
-                batch["depth_image"] * outputs["directions_norm"],
-            ))
-
-        depth_vis.append(depth)
-        combined_depth = torch.cat(depth_vis, dim=1)
-
-        combined_alive_ray_mask = torch.cat([alive_ray_mask], dim=1)
 
         images_dict = {
             "img": combined_rgb,
-            "accumulation": combined_acc,
-            "depth": combined_depth,
-            "alive_ray_mask": combined_alive_ray_mask,
         }
 
-        if not self.training:
-            images_dict["levels"] = colormaps.apply_colormap(outputs["levels"] / self.config.num_levels, cmap="turbo")
+        if "accumulation" in outputs:
+            acc = colormaps.apply_colormap(outputs["accumulation"])
+            depth = colormaps.apply_depth_colormap(
+                outputs["depth"],
+                accumulation=outputs["accumulation"],
+            )
+            alive_ray_mask = colormaps.apply_colormap(outputs["alive_ray_mask"])
+            combined_acc = torch.cat([acc], dim=1)
 
-        for i in range(self.config.num_levels):
-            if f"rgb_level_{i}" in outputs:
-                images_dict[f"rgb_level_{i}"] = torch.cat([image, outputs[f"rgb_level_{i}"]], dim=1)
-                images_dict[f"depth_level_{i}"] = colormaps.apply_depth_colormap(
-                    outputs[f"depth_level_{i}"],
-                    accumulation=outputs["accumulation"],
-                )
+            depth_vis = []
+            if "depth_image" in batch:
+                depth_vis.append(colormaps.apply_depth_colormap(
+                    batch["depth_image"] * outputs["directions_norm"],
+                ))
+
+            depth_vis.append(depth)
+            combined_depth = torch.cat(depth_vis, dim=1)
+
+            combined_alive_ray_mask = torch.cat([alive_ray_mask], dim=1)
+
+            images_dict["accumulation"] = combined_acc
+            images_dict["depth"] = combined_depth
+            images_dict["alive_ray_mask"] = combined_alive_ray_mask
+
+            if not self.training and "levels" in outputs:
+                images_dict["levels"] = colormaps.apply_colormap(outputs["levels"] / self.config.num_levels, cmap="turbo")
+
+            for i in range(self.config.num_levels):
+                if f"rgb_level_{i}" in outputs:
+                    images_dict[f"rgb_level_{i}"] = torch.cat([image, outputs[f"rgb_level_{i}"]], dim=1)
+                    images_dict[f"depth_level_{i}"] = colormaps.apply_depth_colormap(
+                        outputs[f"depth_level_{i}"],
+                        accumulation=outputs["accumulation"],
+                    )
 
         if "mask" in batch:
             mask = batch["mask"]
