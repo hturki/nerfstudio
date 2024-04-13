@@ -39,6 +39,8 @@ from nerfstudio.data.datamanagers.parallel_datamanager import ParallelDataManage
 from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttributes
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import profiler
+from nerfstudio.utils.comms import get_local_rank
+from nerfstudio.utils.rich_utils import CONSOLE
 
 
 def module_wrapper(ddp_or_model: Union[DDP, Model]) -> Model:
@@ -133,15 +135,17 @@ class Pipeline(nn.Module):
         Args:
             step: current iteration step to update sampler if using DDP (distributed)
         """
-        if self.world_size > 1 and step:
-            assert self.datamanager.train_sampler is not None
-            self.datamanager.train_sampler.set_epoch(step)
-        ray_bundle, batch = self.datamanager.next_train(step)
-        model_outputs = self.model(ray_bundle, batch)
-        metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
-        loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
-
-        return model_outputs, loss_dict, metrics_dict
+        # if self.world_size > 1 and step:
+        #     assert self.datamanager.train_sampler is not None
+        #     self.datamanager.train_sampler.set_epoch(step)
+        # ray_bundle, batch = self.datamanager.next_train(step)
+        # model_outputs = self.model(ray_bundle, batch)
+        #
+        # metrics_dict = self.model.get_metrics_dict(model_outputs, batch)
+        # loss_dict = self.model.get_loss_dict(model_outputs, batch, metrics_dict)
+        #
+        # return model_outputs, loss_dict, metrics_dict
+        raise Exception()
 
     @profiler.time_function
     def get_eval_loss_dict(self, step: int):
@@ -279,7 +283,9 @@ class VanillaPipeline(Pipeline):
 
         self.world_size = world_size
         if world_size > 1:
-            self._model = typing.cast(Model, DDP(self._model, device_ids=[local_rank], find_unused_parameters=True))
+            self._model = typing.cast(Model, DDP(self._model, device_ids=[local_rank], find_unused_parameters=False))
+            # self._model = typing.cast(Model, DDP(nn.SyncBatchNorm.convert_sync_batchnorm(self._model), device_ids=[local_rank], find_unused_parameters=False))
+            self.local_rank = local_rank
             dist.barrier(device_ids=[local_rank])
 
     @property
@@ -359,7 +365,7 @@ class VanillaPipeline(Pipeline):
         """
         self.eval()
         metrics_dict_list = []
-        assert isinstance(self.datamanager, (VanillaDataManager, ParallelDataManager, FullImageDatamanager))
+        # assert isinstance(self.datamanager, (VanillaDataManager, ParallelDataManager, FullImageDatamanager))
         num_images = len(self.datamanager.fixed_indices_eval_dataloader)
         with Progress(
             TextColumn("[progress.description]{task.description}"),

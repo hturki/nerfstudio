@@ -67,7 +67,7 @@ def synchronize():
     Helper function to synchronize (barrier) among all processes when
     using distributed training
     """
-    if dist.get_world_size() == 1:
+    if get_world_size() == 1:
         return
     if dist.get_backend() == dist.Backend.NCCL:
         # This argument is needed to avoid warnings.

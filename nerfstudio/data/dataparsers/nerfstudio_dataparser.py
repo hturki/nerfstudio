@@ -213,9 +213,9 @@ class Nerfstudio(DataParser):
             elif self.config.eval_mode == "interval":
                 i_train, i_eval = get_train_eval_split_interval(image_filenames, self.config.eval_interval)
             elif self.config.eval_mode == "all":
-                CONSOLE.log(
-                    "[yellow] Be careful with '--eval-mode=all'. If using camera optimization, the cameras may diverge in the current implementation, giving unpredictable results."
-                )
+                # CONSOLE.log(
+                #     "[yellow] Be careful with '--eval-mode=all'. If using camera optimization, the cameras may diverge in the current implementation, giving unpredictable results."
+                # )
                 i_train, i_eval = get_train_eval_split_all(image_filenames)
             else:
                 raise ValueError(f"Unknown eval mode {self.config.eval_mode}")
@@ -357,10 +357,11 @@ class Nerfstudio(DataParser):
                 from rich.prompt import Confirm
 
                 # check if user wants to make a point cloud from colmap points
-                if not self.prompted_user:
-                    self.create_pc = Confirm.ask(
-                        "load_3D_points is true, but the dataset was processed with an outdated ns-process-data that didn't convert colmap points to .ply! Update the colmap dataset automatically?"
-                    )
+                # if not self.prompted_user:
+                #     self.create_pc = Confirm.ask(
+                #         "load_3D_points is true, but the dataset was processed with an outdated ns-process-data that didn't convert colmap points to .ply! Update the colmap dataset automatically?"
+                #     )
+                self.create_pc = True
 
                 if self.create_pc:
                     import json

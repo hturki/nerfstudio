@@ -85,7 +85,8 @@ class Model(nn.Module):
         self.populate_modules()  # populate the modules
         self.callbacks = None
         # to keep track of which device the nn.Module is on
-        self.device_indicator_param = nn.Parameter(torch.empty(0))
+        self.register_buffer("device_indicator_param", torch.empty(0))
+        # self.device_indicator_param = nn.Parameter(torch.empty(0))
 
     @property
     def device(self):

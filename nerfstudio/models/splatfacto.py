@@ -182,9 +182,12 @@ class SplatfactoModel(Model):
         self,
         *args,
         seed_points: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        metadata: Dict[str, Any],
         **kwargs,
     ):
         self.seed_points = seed_points
+        self.points3D_scale = metadata["points3D_scale"]
+        self.points3D_conf = metadata["points3D_conf"]
         super().__init__(*args, **kwargs)
 
     def populate_modules(self):
@@ -197,8 +200,11 @@ class SplatfactoModel(Model):
         distances, _ = self.k_nearest_sklearn(means.data, 3)
         distances = torch.from_numpy(distances)
         # find the average of the three nearest neighbors for each point and use that as the scale
-        avg_dist = distances.mean(dim=-1, keepdim=True)
-        scales = torch.nn.Parameter(torch.log(avg_dist.repeat(1, 3)))
+        # avg_dist = distances.mean(dim=-1, keepdim=True)
+        # scales = torch.nn.Parameter(torch.log(avg_dist.repeat(1, 3)))
+
+        scales = torch.nn.Parameter(torch.log(self.points3D_scale.repeat(1, 3)))
+
         num_points = means.shape[0]
         quats = torch.nn.Parameter(random_quat_tensor(num_points))
         dim_sh = num_sh_bases(self.config.sh_degree)
@@ -222,7 +228,10 @@ class SplatfactoModel(Model):
             features_dc = torch.nn.Parameter(torch.rand(num_points, 3))
             features_rest = torch.nn.Parameter(torch.zeros((num_points, dim_sh - 1, 3)))
 
-        opacities = torch.nn.Parameter(torch.logit(0.1 * torch.ones(num_points, 1)))
+        # opacities = torch.nn.Parameter(torch.ones(num_points, 1))
+        # opacities = torch.nn.Parameter(torch.logit(torch.ones(num_points, 1)))
+        opacities = torch.nn.Parameter(torch.logit(self.points3D_conf))
+
         self.gauss_params = torch.nn.ParameterDict(
             {
                 "means": means,
@@ -309,7 +318,8 @@ class SplatfactoModel(Model):
             self.gauss_params[name] = torch.nn.Parameter(torch.zeros(new_shape, device=self.device))
         super().load_state_dict(dict, **kwargs)
 
-    def k_nearest_sklearn(self, x: torch.Tensor, k: int):
+    @staticmethod
+    def k_nearest_sklearn(x: torch.Tensor, k: int):
         """
             Find k-nearest neighbors using sklearn's NearestNeighbors.
         x: The data tensor of shape [num_samples, num_features]
@@ -596,20 +606,20 @@ class SplatfactoModel(Model):
         cbs = []
         cbs.append(TrainingCallback([TrainingCallbackLocation.BEFORE_TRAIN_ITERATION], self.step_cb))
         # The order of these matters
-        cbs.append(
-            TrainingCallback(
-                [TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
-                self.after_train,
-            )
-        )
-        cbs.append(
-            TrainingCallback(
-                [TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
-                self.refinement_after,
-                update_every_num_iters=self.config.refine_every,
-                args=[training_callback_attributes.optimizers],
-            )
-        )
+        # cbs.append(
+        #     TrainingCallback(
+        #         [TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
+        #         self.after_train,
+        #     )
+        # )
+        # cbs.append(
+        #     TrainingCallback(
+        #         [TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
+        #         self.refinement_after,
+        #         update_every_num_iters=self.config.refine_every,
+        #         args=[training_callback_attributes.optimizers],
+        #     )
+        # )
         return cbs
 
     def step_cb(self, step):
@@ -893,8 +903,8 @@ class SplatfactoModel(Model):
             scale_reg = torch.tensor(0.0).to(self.device)
 
         return {
-            "main_loss": (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss,
-            "scale_reg": scale_reg,
+            "main_loss": ((1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss) * 0,
+            "scale_reg": 0 * scale_reg,
         }
 
     @torch.no_grad()

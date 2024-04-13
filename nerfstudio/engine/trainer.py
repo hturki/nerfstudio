@@ -21,6 +21,7 @@ import dataclasses
 import functools
 import os
 import time
+import traceback
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,12 +33,14 @@ from rich import box, style
 from rich.panel import Panel
 from rich.table import Table
 from torch.cuda.amp.grad_scaler import GradScaler
+from torch.distributed.optim import ZeroRedundancyOptimizer
 
 from nerfstudio.configs.experiment_config import ExperimentConfig
 from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttributes, TrainingCallbackLocation
 from nerfstudio.engine.optimizers import Optimizers
 from nerfstudio.pipelines.base_pipeline import VanillaPipeline
 from nerfstudio.utils import profiler, writer
+from nerfstudio.utils.comms import get_local_rank, synchronize, is_main_process
 from nerfstudio.utils.decorators import check_eval_enabled, check_main_thread, check_viewer_enabled
 from nerfstudio.utils.misc import step_check
 from nerfstudio.utils.rich_utils import CONSOLE
@@ -260,8 +263,8 @@ class Trainer:
                     writer.put_time(
                         name=EventName.TRAIN_RAYS_PER_SEC,
                         duration=self.world_size
-                        * self.pipeline.datamanager.get_train_rays_per_batch()
-                        / max(0.001, train_t.duration),
+                                 * self.pipeline.datamanager.get_train_rays_per_batch()
+                                 / max(0.001, train_t.duration),
                         step=step,
                         avg_over_steps=True,
                     )
@@ -279,7 +282,7 @@ class Trainer:
                     # (https://pytorch.org/docs/stable/notes/cuda.html#cuda-memory-management)
                     # for more details about GPU memory management.
                     writer.put_scalar(
-                        name="GPU Memory (MB)", scalar=torch.cuda.max_memory_allocated() / (1024**2), step=step
+                        name="GPU Memory (MB)", scalar=torch.cuda.max_memory_allocated() / (1024 ** 2), step=step
                     )
 
                 # Do not perform evaluation if there are no validation images
@@ -318,10 +321,10 @@ class Trainer:
     def _check_viewer_warnings(self) -> None:
         """Helper to print out any warnings regarding the way the viewer/loggers are enabled"""
         if (
-            (self.config.is_viewer_legacy_enabled() or self.config.is_viewer_enabled())
-            and not self.config.is_tensorboard_enabled()
-            and not self.config.is_wandb_enabled()
-            and not self.config.is_comet_enabled()
+                (self.config.is_viewer_legacy_enabled() or self.config.is_viewer_enabled())
+                and not self.config.is_tensorboard_enabled()
+                and not self.config.is_wandb_enabled()
+                and not self.config.is_comet_enabled()
         ):
             string: str = (
                 "[NOTE] Not running eval iterations since only viewer is enabled.\n"
@@ -395,7 +398,7 @@ class Trainer:
             if load_step is None:
                 print("Loading latest Nerfstudio checkpoint from load_dir...")
                 # NOTE: this is specific to the checkpoint name format
-                load_step = sorted(int(x[x.find("-") + 1 : x.find(".")]) for x in os.listdir(load_dir))[-1]
+                load_step = sorted(int(x[x.find("-") + 1: x.find(".")]) for x in os.listdir(load_dir))[-1]
             load_path: Path = load_dir / f"step-{load_step:09d}.ckpt"
             assert load_path.exists(), f"Checkpoint {load_path} does not exist"
             loaded_state = torch.load(load_path, map_location="cpu")
@@ -421,16 +424,24 @@ class Trainer:
         else:
             CONSOLE.print("No Nerfstudio checkpoint to load, so training from scratch.")
 
-    @check_main_thread
     def save_checkpoint(self, step: int) -> None:
         """Save the model and optimizers
 
         Args:
             step: number of steps in training for given checkpoint
         """
+        for k, v in self.optimizers.optimizers.items():
+            if isinstance(v, ZeroRedundancyOptimizer):
+                v.consolidate_state_dict()
+                synchronize()
+
+        if not is_main_process():
+            return
+
         # possibly make the checkpoint directory
         if not self.checkpoint_dir.exists():
             self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
         # save the checkpoint
         ckpt_path: Path = self.checkpoint_dir / f"step-{step:09d}.ckpt"
         torch.save(
@@ -467,15 +478,24 @@ class Trainer:
         cpu_or_cuda_str: str = self.device.split(":")[0]
         cpu_or_cuda_str = "cpu" if cpu_or_cuda_str == "mps" else cpu_or_cuda_str
 
-        with torch.autocast(device_type=cpu_or_cuda_str, enabled=self.mixed_precision):
-            _, loss_dict, metrics_dict = self.pipeline.get_train_loss_dict(step=step)
-            loss = functools.reduce(torch.add, loss_dict.values())
-        self.grad_scaler.scale(loss).backward()  # type: ignore
         needs_step = [
             group
             for group in self.optimizers.parameters.keys()
             if step % self.gradient_accumulation_steps[group] == self.gradient_accumulation_steps[group] - 1
         ]
+
+        if self.world_size > 1 and len(needs_step) == 0:
+            with self.pipeline._model.no_sync():
+                with torch.autocast(device_type=cpu_or_cuda_str, enabled=self.mixed_precision):
+                    _, loss_dict, metrics_dict = self.pipeline.get_train_loss_dict(step=step)
+                    loss = functools.reduce(torch.add, loss_dict.values())
+                self.grad_scaler.scale(loss).backward()  # type: ignore
+        else:
+            with torch.autocast(device_type=cpu_or_cuda_str, enabled=self.mixed_precision):
+                _, loss_dict, metrics_dict = self.pipeline.get_train_loss_dict(step=step)
+                loss = functools.reduce(torch.add, loss_dict.values())
+            self.grad_scaler.scale(loss).backward()  # type: ignore
+
         self.optimizers.optimizer_scaler_step_some(self.grad_scaler, needs_step)
 
         if self.config.log_gradients:
@@ -489,11 +509,12 @@ class Trainer:
 
             metrics_dict["Gradients/Total"] = cast(torch.Tensor, total_grad)  # type: ignore
 
-        scale = self.grad_scaler.get_scale()
-        self.grad_scaler.update()
-        # If the gradient scaler is decreased, no optimization step is performed so we should not step the scheduler.
-        if scale <= self.grad_scaler.get_scale():
-            self.optimizers.scheduler_step_all(step)
+        if len(needs_step) > 0:
+            scale = self.grad_scaler.get_scale()
+            self.grad_scaler.update()
+            # If the gradient scaler is decreased, no optimization step is performed so we should not step the scheduler.
+            if scale <= self.grad_scaler.get_scale():
+                self.optimizers.scheduler_step_all(step)
 
         # Merging loss and metrics dict into a single output.
         return loss, loss_dict, metrics_dict  # type: ignore
@@ -516,18 +537,21 @@ class Trainer:
 
         # one eval image
         if step_check(step, self.config.steps_per_eval_image):
-            with TimeWriter(writer, EventName.TEST_RAYS_PER_SEC, write=False) as test_t:
-                metrics_dict, images_dict = self.pipeline.get_eval_image_metrics_and_images(step=step)
-            writer.put_time(
-                name=EventName.TEST_RAYS_PER_SEC,
-                duration=metrics_dict["num_rays"] / test_t.duration,
-                step=step,
-                avg_over_steps=True,
-            )
-            writer.put_dict(name="Eval Images Metrics", scalar_dict=metrics_dict, step=step)
-            group = "Eval Images"
-            for image_name, image in images_dict.items():
-                writer.put_image(name=group + "/" + image_name, image=image, step=step)
+            if get_local_rank() == 0:
+                with TimeWriter(writer, EventName.TEST_RAYS_PER_SEC, write=False) as test_t:
+                    metrics_dict, images_dict = self.pipeline.get_eval_image_metrics_and_images(step=step)
+                writer.put_time(
+                    name=EventName.TEST_RAYS_PER_SEC,
+                    duration=metrics_dict["num_rays"] / test_t.duration,
+                    step=step,
+                    avg_over_steps=True,
+                )
+                writer.put_dict(name="Eval Images Metrics", scalar_dict=metrics_dict, step=step)
+                group = "Eval Images"
+                for image_name, image in images_dict.items():
+                    writer.put_image(name=group + "/" + image_name, image=image, step=step)
+
+            synchronize()
 
         # all eval images
         if step_check(step, self.config.steps_per_eval_all_images):

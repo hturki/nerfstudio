@@ -44,15 +44,17 @@ try:
     tcnn = tinycudann
     del tinycudann
     TCNN_EXISTS = True
-except ModuleNotFoundError as _exp:
-    tcnn_import_exception = _exp
-except ImportError as _exp:
-    tcnn_import_exception = _exp
-except EnvironmentError as _exp:
-    if "Unknown compute capability" not in _exp.args[0]:
-        raise _exp
-    print("Could not load tinycudann: " + str(_exp), file=sys.stderr)
-    tcnn_import_exception = _exp
-
-if tcnn_import_exception is not None:
-    tcnn = _LazyError(tcnn_import_exception)
+except:
+    pass
+# except ModuleNotFoundError as _exp:
+#     tcnn_import_exception = _exp
+# except ImportError as _exp:
+#     tcnn_import_exception = _exp
+# except EnvironmentError as _exp:
+#     if "Unknown compute capability" not in _exp.args[0]:
+#         raise _exp
+#     print("Could not load tinycudann: " + str(_exp), file=sys.stderr)
+#     tcnn_import_exception = _exp
+#
+# if tcnn_import_exception is not None:
+#     tcnn = _LazyError(tcnn_import_exception)

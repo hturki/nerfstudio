@@ -678,7 +678,7 @@ def create_ply_from_colmap(
 
     # Load point Positions
     points3D = torch.from_numpy(np.array([p.xyz for p in colmap_points.values()], dtype=np.float32))
-    if applied_transform is not None:
+    if applied_transform is not None and points3D.shape[0] > 0:
         assert applied_transform.shape == (3, 4)
         points3D = torch.einsum("ij,bj->bi", applied_transform[:3, :3], points3D) + applied_transform[:3, 3]
 
